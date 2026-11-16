@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           pip install "PySide6>=6.6" pyinstaller pytest
-          QT_QPA_PLATFORM=offscreen pytest -q tests
+          QT_QPA_PLATFORM=offscreen python -m pytest -q -p no:cacheprovider tests
           pyinstaller --noconfirm --clean dxclusterclient.spec
           VERSION=$(python -c "import dxclient; print(dxclient.__version__)")
           mkdir -p dist/release

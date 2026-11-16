@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
-from ..core.bands import BAND_NAMES, MAIN_BANDS, MODES
+from ..core.bands import BAND_NAMES, MAIN_BANDS, MODES, mode_label
 from ..core.dxcc import CONTINENTS
 from ..core.filters import COUNTRY_ALL, COUNTRY_EXCLUDE, COUNTRY_ONLY, SpotFilter
 from ..i18n import tr
@@ -139,7 +139,6 @@ def _link_button() -> QToolButton:
     return b
 
 
-_MODE_SHORT = {"PHONE": "SSB"}
 
 
 class FilterPanel(QWidget):
@@ -198,7 +197,7 @@ class FilterPanel(QWidget):
             lambda b: b if b == VHF_KEY else b.removesuffix("m"),
             lambda b: tr("Other bands (VHF+, unknown)") if b == VHF_KEY else b,
         )
-        self.modes = _ToggleGroup("Modes", MODES, 4, lambda m: _MODE_SHORT.get(m, m), tr)
+        self.modes = _ToggleGroup("Modes", MODES, 4, mode_label, tr)
         self.dx_cont = _ToggleGroup("DX continent", CONTINENTS, 7)
         self.sp_cont = _ToggleGroup("Spotter continent", CONTINENTS, 7)
         for g in (self.bands, self.modes, self.dx_cont, self.sp_cont):

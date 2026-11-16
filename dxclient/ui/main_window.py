@@ -1,30 +1,39 @@
 """Main application window."""
 from __future__ import annotations
 
+import logging
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QIcon
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDockWidget, QLabel, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QSystemTrayIcon, QTableView, QTabWidget, QToolBar,
+    QAbstractItemView, QApplication, QComboBox, QDockWidget, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QMenu, QMessageBox, QPushButton, QSizePolicy, QSystemTrayIcon, QTableView, QTabWidget, QToolBar,
+    QVBoxLayout, QWidget,
 )
 
 from .. import __version__
 from ..core.alarms import KIND_COUNTRY, AlarmEntry, AlarmList
+from ..core.bands import mode_label
 from ..core.cluster_list import parse_address
 from ..core.dxcc import DxccDB
 from ..core.filters import SpotFilter
+from ..core.geo import bearing_distance, locator_to_latlon
 from ..core.settings import Settings, config_dir
+from ..core.solar import SolarData, SolarFetcher
 from ..core.spot import Spot, parse_spot
 from ..core.telnet_client import STATE_CONNECTED, STATE_DISCONNECTED, ClusterClient
 from ..core.telnet_server import SpotServer
+from ..core.updates import RELEASES_PAGE, UpdateChecker
 from ..i18n import LANGUAGES, tr, translator
 from .alarm_tab import AlarmTab
 from .clusters_tab import ClustersTab
 from .console_tab import ConsoleTab
 from .filter_panel import FilterPanel
+from .send_spot import SendSpotDialog
 from .settings_dialog import SettingsDialog
 from .spot_model import COL_TIME, SpotFilterProxy, SpotTableModel, setup_spot_view
 
@@ -36,19 +45,24 @@ except ImportError:  # pragma: no cover
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 CTY_URL = "https://www.country-files.com/cty/cty.dat"
 CLUSTER_LIST_MAX_AGE = 3600
+CTY_MAX_AGE_DAYS = 30
+UPDATE_CHECK_INTERVAL = 24 * 3600
+log = logging.getLogger("dxclient.ui")
 
 
 def load_dxcc() -> DxccDB:
-    user = config_dir() / "cty.dat"
-    for p in (user, DATA_DIR / "cty.dat"):
-        if p.exists():
-            try:
-                db = DxccDB.from_file(p)
-                if len(db.entities) > 100:
-                    return db
-            except OSError:
-                pass
-    return DxccDB()
+    """Load cty.dat: the user's downloaded copy or the bundled one, whichever is newer."""
+    best: DxccDB | None = None
+    for p in (config_dir() / "cty.dat", DATA_DIR / "cty.dat"):
+        if not p.exists():
+            continue
+        try:
+            db = DxccDB.from_file(p)
+        except OSError:
+            continue
+        if len(db.entities) > 100 and (best is None or (db.version or date.min) > (best.version or date.min)):
+            best = db
+    return best or DxccDB()
 
 
 class MainWindow(QMainWindow):
@@ -61,6 +75,7 @@ class MainWindow(QMainWindow):
             [AlarmEntry.from_dict(d) for d in settings["alarms"]], settings["alarm_repeat_minutes"]
         )
         self.unread_alarms = 0
+        self.home = locator_to_latlon(settings["locator"]) if settings["locator"] else None
         self.setWindowIcon(QIcon(str(DATA_DIR / "icon.svg")))
         self.resize(1200, 750)
 
@@ -91,6 +106,17 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.cluster_combo)
         tb.addWidget(self.connect_btn)
         tb.addWidget(self.state_lbl)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
+        self.solar_lbl = QLabel("SFI —  A —  K —  SN —")
+        self.solar_lbl.setContentsMargins(0, 0, 8, 0)
+        self.solar_lbl.setTextFormat(Qt.TextFormat.RichText)
+        tb.addWidget(self.solar_lbl)
+        self.solar = SolarFetcher(self)
+        self.solar.updated.connect(self._on_solar)
+        self.solar.failed.connect(self._on_solar_failed)
+        self._solar_error = ""
 
         # ---------------- status bar
         self.count_lbl = QLabel()
@@ -125,6 +151,23 @@ class MainWindow(QMainWindow):
         self.proxy.modelReset.connect(self._update_counts)
         self.proxy.layoutChanged.connect(self._update_counts)
 
+        self.spots_page = QWidget()
+        sp = QVBoxLayout(self.spots_page)
+        sp.setContentsMargins(0, 4, 0, 0)
+        row = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(240)
+        self.search.setMaximumWidth(320)
+        self.search.textChanged.connect(self._search_changed)
+        self.send_spot_btn = QPushButton()
+        self.send_spot_btn.clicked.connect(lambda: self._send_spot_dialog())
+        row.addWidget(self.search)
+        row.addStretch(1)
+        row.addWidget(self.send_spot_btn)
+        sp.addLayout(row)
+        sp.addWidget(self.spot_view)
+
         countries = self.db.country_names
         self.alarm_tab = AlarmTab(countries)
         self.alarm_tab.set_entries(self.alarms.entries)
@@ -142,7 +185,7 @@ class MainWindow(QMainWindow):
         self.clusters_tab.connect_requested.connect(self._connect_to_node)
         self.clusters_tab.custom_changed.connect(lambda lst: self._set("custom_clusters", lst))
 
-        self.tabs.addTab(self.spot_view, "")
+        self.tabs.addTab(self.spots_page, "")
         self.tabs.addTab(self.alarm_tab, "")
         self.tabs.addTab(self.console, "")
         self.tabs.addTab(self.clusters_tab, "")
@@ -181,6 +224,29 @@ class MainWindow(QMainWindow):
         self.retranslate()
         self._on_state(STATE_DISCONNECTED)
         self._apply_server_settings()
+        self._apply_age_settings()
+        QTimer.singleShot(1000, self.solar.start)
+
+        # spot aging: remove / grey out old spots once a minute
+        self.age_timer = QTimer(self)
+        self.age_timer.setInterval(60_000)
+        self.age_timer.timeout.connect(self._age_tick)
+        self.age_timer.start()
+
+        # new version check and cty.dat freshness
+        self.updates = UpdateChecker(self)
+        self.updates.update_available.connect(self._update_available)
+        self.updates.up_to_date.connect(self._up_to_date)
+        self.updates.failed.connect(self._update_check_failed)
+        self._manual_update_check = False
+        self.update_lbl = QLabel()
+        self.update_lbl.setOpenExternalLinks(True)
+        self.update_lbl.hide()
+        self.statusBar().addWidget(self.update_lbl)
+        if settings["check_updates"] and time.time() - settings["last_update_check"] > UPDATE_CHECK_INTERVAL:
+            QTimer.singleShot(3000, self._auto_update_check)
+        if settings["auto_update_cty"] and self._cty_outdated():
+            QTimer.singleShot(5000, lambda: self._update_cty(silent=True))
 
         if settings["geometry"]:
             self.restoreGeometry(QByteArray.fromBase64(settings["geometry"].encode()))
@@ -217,6 +283,10 @@ class MainWindow(QMainWindow):
             group.addAction(a)
             self.lang_menu.addAction(a)
         self.help_menu = mb.addMenu("")
+        self.act_check_updates = self.help_menu.addAction("", self._manual_update)
+        self.act_open_folder = self.help_menu.addAction(
+            "", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(config_dir()))))
+        self.help_menu.addSeparator()
         self.act_about = self.help_menu.addAction("", self._about)
 
     def retranslate(self, *_):
@@ -235,6 +305,10 @@ class MainWindow(QMainWindow):
         self.lang_menu.setTitle(tr("Language"))
         self.help_menu.setTitle(tr("Help"))
         self.act_about.setText(tr("About"))
+        self.act_check_updates.setText(tr("Check for updates"))
+        self.act_open_folder.setText(tr("Open settings and log folder"))
+        self.search.setPlaceholderText(tr("Search callsign or country..."))
+        self.send_spot_btn.setText(tr("Send spot..."))
         self.spot_model.retranslate()
         self.filter_panel.retranslate()
         self.alarm_tab.retranslate()
@@ -243,6 +317,7 @@ class MainWindow(QMainWindow):
         self._on_state(self.client.state)
         self._update_counts()
         self._update_server_label()
+        self._update_solar_label()
 
     # ================================================================ settings
     def _set(self, key, value) -> None:
@@ -262,6 +337,8 @@ class MainWindow(QMainWindow):
             self.alarms.repeat_minutes = self.s["alarm_repeat_minutes"]
             self.client.auto_reconnect = self.s["auto_reconnect"]
             self._apply_server_settings()
+            self._apply_age_settings()
+            self._set_home(self.s["locator"])
             translator.set_language(self.s["language"])
             for a in self.lang_menu.actions():
                 a.setChecked(a.text() == LANGUAGES.get(self.s["language"]))
@@ -320,6 +397,8 @@ class MainWindow(QMainWindow):
         self.state_lbl.setStyleSheet(f"color: {color}; font-weight: bold;")
         self.connect_btn.setText(tr("Connect") if state == STATE_DISCONNECTED else tr("Disconnect"))
         self.cluster_combo.setEnabled(state == STATE_DISCONNECTED)
+        self.send_spot_btn.setEnabled(state == STATE_CONNECTED)
+        self.send_spot_btn.setToolTip("" if state == STATE_CONNECTED else tr("Connect to a cluster first."))
 
     # ================================================================ spots
     def _on_line(self, line: str) -> None:
@@ -327,16 +406,71 @@ class MainWindow(QMainWindow):
         spot = parse_spot(line, self.db)
         if spot is None:
             return
+        age = spot.age_minutes()
+        max_age = self.s["max_age_minutes"]
+        if max_age and age > max_age:
+            return  # e.g. hours-old spots from sh/dx: not worth showing
+        fresh = not self.s["fresh_minutes"] or age <= self.s["fresh_minutes"]
+        self._apply_geo(spot)
         entry = self.alarms.find(spot)
-        if entry:
-            spot.alarm = True
-        self.spot_model.add_spot(spot)
-        if self.server.listening and self._passes_filter(spot):
+        spot.alarm = entry is not None
+        dupe = self.s["dupe_minutes"]
+        replaced = self.spot_model.add_spot(spot, dupe)
+        # loggers get each station once per dupe window, and only fresh spots
+        if fresh and replaced is None and self.server.listening and self._passes_filter(spot):
             self.server.send_spot(spot)
         if entry:
-            self.alarm_tab.model.add_spot(spot)
-            if self.alarms.should_notify(spot):
+            self.alarm_tab.model.add_spot(spot, dupe)
+            if fresh and self.alarms.should_notify(spot):
                 self._notify(spot, entry)
+
+    def _apply_geo(self, spot: Spot) -> None:
+        e = spot.dx_entity
+        if self.home and e:
+            spot.bearing, spot.distance = bearing_distance(self.home[0], self.home[1], e.lat, e.lon)
+        else:
+            spot.bearing = spot.distance = None
+
+    def _set_home(self, locator: str) -> None:
+        home = locator_to_latlon(locator) if locator else None
+        if home == self.home:
+            return
+        self.home = home
+        for model in (self.spot_model, self.alarm_tab.model):
+            for s in model.spots:
+                self._apply_geo(s)
+            model.refresh_alarm_flags()
+
+    # ================================================================ aging
+    def _apply_age_settings(self) -> None:
+        fade = self.s["max_age_minutes"] // 2
+        self.spot_model.fade_minutes = fade
+        self.alarm_tab.model.fade_minutes = fade
+        self._age_tick()
+
+    def _age_tick(self) -> None:
+        now = datetime.now(timezone.utc)
+        if self.s["max_age_minutes"]:
+            self.spot_model.remove_older_than(self.s["max_age_minutes"], now)
+        self.spot_model.tick(now)
+        self.alarm_tab.model.tick(now)
+        self._update_counts()
+
+    def _search_changed(self, text: str) -> None:
+        self.proxy.set_search(text)
+        self._update_counts()
+
+    # ================================================================ sending spots
+    def _send_spot_dialog(self, spot: Spot | None = None) -> None:
+        if self.client.state != STATE_CONNECTED:
+            return
+        dlg = SendSpotDialog(spot.freq if spot else None, spot.dx if spot else "", self)
+        if dlg.exec():
+            cmd = dlg.command()
+            if cmd:
+                self.console.append(f">>> {cmd}")
+                self.client.send(cmd)
+                self.statusBar().showMessage(tr("Spot sent: {cmd} (the cluster reply is in the Console)", cmd=cmd), 10000)
 
     # ================================================================ telnet server
     def _passes_filter(self, spot: Spot) -> bool:
@@ -379,6 +513,41 @@ class MainWindow(QMainWindow):
             self.server_lbl.setText("")
         self.server_lbl.setToolTip(self._server_error_text)
 
+    # ================================================================ solar indices
+    def _on_solar(self, d: SolarData) -> None:
+        self._solar_error = ""
+        self._update_solar_label()
+
+    def _on_solar_failed(self, msg: str) -> None:
+        self._solar_error = msg
+        self._update_solar_label()
+
+    def _update_solar_label(self) -> None:
+        d = self.solar.data
+        if d is None:
+            self.solar_lbl.setToolTip(tr("Solar data unavailable: {msg}", msg=self._solar_error)
+                                      if self._solar_error else "")
+            return
+
+        def val(v, warn=None, bad=None):
+            if v is None:
+                return "—"
+            text = f"{v:g}"
+            color = "#c0392b" if bad is not None and v >= bad else "#e67e22" if warn is not None and v >= warn else ""
+            return f"<b style='color:{color}'>{text}</b>" if color else f"<b>{text}</b>"
+
+        self.solar_lbl.setText(
+            f"SFI {val(d.sfi)}&nbsp;&nbsp; A {val(d.a, 16, 30)}&nbsp;&nbsp; "
+            f"K {val(d.k, 4, 5)}&nbsp;&nbsp; SN {val(d.ssn)}"
+        )
+        fetched = d.fetched.strftime("%H:%M UTC") if d.fetched else "?"
+        tip = tr("SFI — solar flux, A / K — geomagnetic indices, SN — sunspot number.") + "\n" + \
+            tr("Source: {src}, data time: {upd}, fetched {at}. Updated hourly.", src=d.source,
+               upd=d.updated or "?", at=fetched)
+        if self._solar_error:
+            tip += "\n" + tr("Last update failed: {msg}", msg=self._solar_error)
+        self.solar_lbl.setToolTip(tip)
+
     def _notify(self, spot: Spot, entry: AlarmEntry) -> None:
         if self.tabs.currentWidget() is not self.alarm_tab:
             self.unread_alarms += 1
@@ -390,7 +559,7 @@ class MainWindow(QMainWindow):
                 QApplication.beep()
         if self.s["alarm_popup"] and self.tray is not None:
             title = tr("ALARM: {dx} {freq} {band} {mode}", dx=spot.dx, freq=f"{spot.freq:.1f}",
-                       band=spot.band or "", mode=tr(spot.mode))
+                       band=spot.band or "", mode=mode_label(spot.mode))
             body = f"{spot.country}\n{spot.comment}\nde {spot.spotter} {spot.time}Z"
             if entry.note:
                 body += f"\n{entry.note}"
@@ -442,6 +611,8 @@ class MainWindow(QMainWindow):
         m = QMenu(self)
         m.addAction(tr("Open in QRZ.com"), lambda: self._lookup(spot))
         m.addAction(tr("Copy callsign"), lambda: QGuiApplication.clipboard().setText(spot.dx))
+        a = m.addAction(tr("Send spot..."), lambda: self._send_spot_dialog(spot))
+        a.setEnabled(self.client.state == STATE_CONNECTED)
         m.addSeparator()
         m.addAction(tr("Add to Alarm"), lambda: self._quick_alarm(AlarmEntry(spot.dx)))
         if spot.country:
@@ -466,27 +637,77 @@ class MainWindow(QMainWindow):
         self.alarm_tab.add_entry(entry)
 
     # ================================================================ cty.dat
-    def _update_cty(self) -> None:
+    def _cty_outdated(self) -> bool:
+        v = self.db.version
+        return v is None or (datetime.now(timezone.utc).date() - v).days > CTY_MAX_AGE_DAYS
+
+    def _update_cty(self, silent: bool = False) -> None:
         req = QNetworkRequest(QUrl(CTY_URL))
         req.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, "DXClusterClient")
         req.setTransferTimeout(30000)
         reply = self._nam.get(req)
-        reply.finished.connect(lambda: self._cty_done(reply))
+        reply.finished.connect(lambda: self._cty_done(reply, silent))
 
-    def _cty_done(self, reply: QNetworkReply) -> None:
+    def _cty_done(self, reply: QNetworkReply, silent: bool = False) -> None:
         reply.deleteLater()
+
+        def fail(msg: str) -> None:
+            log.warning("cty.dat update failed: %s", msg)
+            text = tr("cty.dat update failed: {msg}", msg=msg)
+            if silent:
+                self.statusBar().showMessage(text, 10000)
+            else:
+                QMessageBox.warning(self, "cty.dat", text)
+
         if reply.error() != QNetworkReply.NetworkError.NoError:
-            QMessageBox.warning(self, "cty.dat", tr("cty.dat update failed: {msg}", msg=reply.errorString()))
+            fail(reply.errorString())
             return
         text = bytes(reply.readAll().data()).decode("latin-1")
         db = DxccDB()
         db.load_text(text)
         if len(db.entities) < 300:
-            QMessageBox.warning(self, "cty.dat", tr("cty.dat update failed: {msg}", msg="invalid file"))
+            fail("invalid file")
             return
         (config_dir() / "cty.dat").write_text(text, encoding="latin-1")
         self.db = db
-        QMessageBox.information(self, "cty.dat", tr("cty.dat updated: {n} entities.", n=len(db.entities)))
+        ver = db.version.isoformat() if db.version else "?"
+        log.info("cty.dat updated to %s", ver)
+        msg = tr("cty.dat updated: {n} entities, version {ver}.", n=len(db.entities), ver=ver)
+        if silent:
+            self.statusBar().showMessage(msg, 10000)
+        else:
+            QMessageBox.information(self, "cty.dat", msg)
+
+    # ================================================================ new versions
+    def _auto_update_check(self) -> None:
+        self._manual_update_check = False
+        self._set("last_update_check", time.time())
+        self.updates.check()
+
+    def _manual_update(self) -> None:
+        self._manual_update_check = True
+        self.updates.check()
+
+    def _update_available(self, version: str, url: str) -> None:
+        log.info("new version available: %s", version)
+        self.update_lbl.setText(f"<a href='{url}'>{tr('Version {v} is available', v=version)}</a>")
+        self.update_lbl.show()
+        if self._manual_update_check:
+            QMessageBox.information(
+                self, tr("Check for updates"),
+                tr("Version {v} is available", v=version) + f": <a href='{url}'>{url}</a>")
+
+    def _up_to_date(self) -> None:
+        if self._manual_update_check:
+            QMessageBox.information(self, tr("Check for updates"),
+                                    tr("You have the latest version ({v}).", v=__version__))
+
+    def _update_check_failed(self, msg: str) -> None:
+        log.warning("update check failed: %s", msg)
+        if self._manual_update_check:
+            QMessageBox.warning(self, tr("Check for updates"),
+                                tr("Could not check for updates: {msg}", msg=msg)
+                                + f"<br><a href='{RELEASES_PAGE}'>{RELEASES_PAGE}</a>")
 
     # ================================================================ shutdown
     def closeEvent(self, e) -> None:

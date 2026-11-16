@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .bands import band_of, mode_of
 from .dxcc import DxccDB, Entity
@@ -23,6 +23,14 @@ class Spot:
     received: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     alarm: bool = False
     raw: str = ""  # original cluster line
+    when: datetime | None = None  # spot time (UTC) as reported by the cluster
+    count: int = 1  # how many times the station was spotted (duplicates merged)
+    bearing: int | None = None  # degrees from the user's locator
+    distance: int | None = None  # km
+
+    def age_minutes(self, now: datetime | None = None) -> float:
+        now = now or datetime.now(timezone.utc)
+        return max(0.0, (now - (self.when or self.received)).total_seconds() / 60)
 
     def to_dx_line(self) -> str:
         """Spot as a standard 'DX de' line (the original one when it already was)."""
@@ -56,7 +64,7 @@ _DX_RE = re.compile(
 #   14025.0  JA1ABC      16-Nov-2026 1234Z  CW 599                  <RA3CO>
 _SHDX_RE = re.compile(
     r"^\s*(?P<freq>\d+(?:\.\d+)?)\s+(?P<dx>[A-Za-z0-9/]+)\s+"
-    r"\d{1,2}-[A-Za-z]{3}-\d{4}\s+(?P<time>\d{4})Z\s*"
+    r"(?P<date>\d{1,2}-[A-Za-z]{3}-\d{4})\s+(?P<time>\d{4})Z\s*"
     r"(?P<comment>.*?)\s*<(?P<spotter>[^>]+)>\s*$"
 )
 
@@ -73,7 +81,27 @@ def format_dx_line(spotter: str, freq: float, dx: str, comment: str, time: str) 
     return f"DX de {spotter + ':':<10}{freq:>8.1f}  {dx:<12} {comment[:30]:<30} {hhmm}Z"
 
 
-def parse_spot(line: str, db: DxccDB | None = None) -> Spot | None:
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+
+def spot_datetime(hhmm: str, date_str: str | None, now: datetime) -> datetime:
+    """Full UTC time of a spot. 'DX de' lines carry only HHMM: assume today, or yesterday
+    when that would be in the future (spots just before midnight)."""
+    h, m = int(hhmm[:2]) % 24, int(hhmm[2:4]) % 60
+    if date_str:
+        try:
+            d, mon, y = date_str.split("-")
+            return datetime(int(y), _MONTHS[mon.lower()], int(d), h, m, tzinfo=timezone.utc)
+        except (KeyError, ValueError):
+            pass
+    t = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    if t - now > timedelta(minutes=5):
+        t -= timedelta(days=1)
+    return t
+
+
+def parse_spot(line: str, db: DxccDB | None = None, now: datetime | None = None) -> Spot | None:
     line = line.rstrip()
     m = _DX_RE.match(line) or _SHDX_RE.match(line)
     if not m:
@@ -92,6 +120,9 @@ def parse_spot(line: str, db: DxccDB | None = None) -> Spot | None:
         time=f"{t[:2]}:{t[2:]}",
         raw=line,
     )
+    now = now or datetime.now(timezone.utc)
+    spot.received = now
+    spot.when = spot_datetime(t, m.groupdict().get("date"), now)
     spot.band = band_of(freq)
     spot.mode = mode_of(freq, comment)
     if db is not None:

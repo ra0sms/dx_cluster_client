@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 CONTINENTS = ["EU", "AS", "NA", "SA", "AF", "OC", "AN"]
@@ -15,6 +16,8 @@ class Entity:
     continent: str
     cq: int
     itu: int
+    lat: float = 0.0  # degrees, north positive
+    lon: float = 0.0  # degrees, east positive (cty.dat stores west positive)
 
 
 _OVERRIDE_RE = re.compile(r"\((\d+)\)|\[(\d+)\]|\{(\w+)\}|<[^>]*>|~[^~]*~")
@@ -28,6 +31,7 @@ class DxccDB:
         self._prefixes: dict[str, Entity] = {}
         self._exact: dict[str, Entity] = {}
         self._max_len = 0
+        self.version: date | None = None  # from the "=VERyyyymmdd" marker
 
     # ------------------------------------------------------------------ loading
     @classmethod
@@ -40,6 +44,13 @@ class DxccDB:
         self.entities.clear()
         self._prefixes.clear()
         self._exact.clear()
+        self.version = None
+        m = re.search(r"=VER(\d{4})(\d{2})(\d{2})", text)
+        if m:
+            try:
+                self.version = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                pass
         # Records end with ';'. The header line holds 8 colon-separated fields,
         # the alias list follows.
         for record in text.split(";"):
@@ -56,8 +67,12 @@ class DxccDB:
             except ValueError:
                 continue
             cont = parts[3].strip()
+            try:
+                lat, lon = float(parts[4]), -float(parts[5])
+            except ValueError:
+                lat = lon = 0.0
             primary = parts[7].strip().lstrip("*")
-            base = Entity(name, primary, cont, cq, itu)
+            base = Entity(name, primary, cont, cq, itu, lat, lon)
             self.entities.append(base)
             aliases = ":".join(parts[8:]).replace("\n", " ").replace("\r", " ")
             for alias in aliases.split(","):
@@ -78,7 +93,7 @@ class DxccDB:
                         elif m.group(3):
                             cont_o = m.group(3)
                     alias = _OVERRIDE_RE.sub("", alias)
-                    ent = Entity(name, primary, cont_o, cq_o, itu_o)
+                    ent = Entity(name, primary, cont_o, cq_o, itu_o, lat, lon)
                 alias = alias.upper()
                 if exact:
                     self._exact[alias] = ent

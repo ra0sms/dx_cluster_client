@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..core.alarms import KIND_CALL, KIND_COUNTRY, AlarmEntry
-from ..core.bands import BAND_NAMES, MODES
+from ..core.bands import BAND_NAMES, MODES, mode_label
 from ..i18n import tr
 from .spot_model import SpotTableModel, setup_spot_view
 
@@ -50,7 +50,8 @@ class AlarmEntryDialog(QDialog):
         h = QHBoxLayout(modes_box)
         self.mode_cb: dict[str, QCheckBox] = {}
         for m in MODES:
-            cb = QCheckBox(tr(m))
+            cb = QCheckBox(mode_label(m))
+            cb.setToolTip(tr(m))
             cb.setChecked(m in entry.modes)
             self.mode_cb[m] = cb
             h.addWidget(cb)
@@ -151,7 +152,7 @@ class WatchListDialog(QDialog):
                 e.pattern,
                 tr("Callsign") if e.kind == KIND_CALL else tr("Country"),
                 ", ".join(b for b in BAND_NAMES if b in e.bands) or tr("any"),
-                ", ".join(tr(m) for m in MODES if m in e.modes) or tr("any"),
+                ", ".join(mode_label(m) for m in MODES if m in e.modes) or tr("any"),
                 e.note,
             ]
             for c, v in enumerate(vals, start=1):

@@ -145,3 +145,80 @@ def test_dx_line_format():
     assert parse_spot(raw).to_dx_line() == raw
     shdx = parse_spot("   7074.0  UA0SMS      16-Nov-2026 0101Z  FT8 -12dB               <DL1ABC>")
     assert shdx.to_dx_line().startswith("DX de DL1ABC:     7074.0  UA0SMS       FT8 -12dB")
+
+
+def test_mode_label():
+    from dxclient.core.bands import mode_label
+
+    assert mode_label("PHONE") == "PH"
+    assert mode_label("CW") == "CW" and mode_label("FT8") == "FT8"
+
+
+def test_solar_parsers():
+    from dxclient.core.solar import parse_hamqsl, parse_noaa_wwv
+
+    xml = """<solar><solardata><updated> 16 Nov 2026 1400 GMT</updated>
+        <solarflux>122</solarflux><aindex> 4</aindex><kindex> 0</kindex>
+        <kindexnt>No Report</kindexnt><sunspots>87</sunspots></solardata></solar>"""
+    d = parse_hamqsl(xml)
+    assert (d.sfi, d.a, d.k, d.ssn, d.updated) == (122, 4, 0.0, 87, "16 Nov 2026 1400 GMT")
+    assert parse_hamqsl("<html>error</html>") is None
+
+    wwv = """:Product: Geophysical Alert Message wwv.txt
+:Issued: 2026 Nov 16 1205 UTC
+Solar-terrestrial indices for 15 November follow.
+Solar flux 122 and estimated planetary A-index 4.
+The estimated planetary K-index at 1200 UTC on 16 November was 0.67."""
+    d = parse_noaa_wwv(wwv)
+    assert (d.sfi, d.a, d.k, d.ssn, d.updated) == (122, 4, 0.67, None, "2026 Nov 16 1205 UTC")
+    assert parse_noaa_wwv("nothing here") is None
+
+
+def test_geo():
+    from dxclient.core.geo import bearing_distance, is_locator, locator_to_latlon
+
+    assert is_locator("KO85") and is_locator("ko85uq") and not is_locator("KO8") and not is_locator("ZZ99")
+    lat, lon = locator_to_latlon("KO85uq")
+    assert abs(lat - 55.69) < 0.05 and abs(lon - 37.71) < 0.05  # Moscow
+    # Moscow → Tokyo ≈ 7480 km, initial great-circle bearing ≈ 59°
+    b, d = bearing_distance(55.75, 37.62, 35.68, 139.69)
+    assert 7400 < d < 7600 and 57 <= b <= 61
+    # London → New York ≈ 5570 km, ≈ 288°
+    b, d = bearing_distance(51.5074, -0.1278, 40.7128, -74.0060)
+    assert 5540 < d < 5600 and 286 <= b <= 290
+    b, d = bearing_distance(0, 0, 0, 90)
+    assert b == 90 and abs(d - 10008) < 5
+
+
+def test_entity_coords_and_cty_version(db):
+    jp = db.lookup("JA1ABC")
+    assert abs(jp.lat - 36.4) < 0.01 and abs(jp.lon - 138.38) < 0.01  # east positive
+    assert db.version is not None and db.version.year >= 2024
+
+
+def test_spot_time_and_age():
+    from datetime import datetime, timezone
+
+    from dxclient.core.spot import spot_datetime
+
+    now = datetime(2026, 11, 16, 12, 0, tzinfo=timezone.utc)
+    assert spot_datetime("1155", None, now) == datetime(2026, 11, 16, 11, 55, tzinfo=timezone.utc)
+    # just before midnight seen just after midnight → yesterday
+    after_midnight = datetime(2026, 11, 17, 0, 3, tzinfo=timezone.utc)
+    assert spot_datetime("2358", None, after_midnight).day == 16
+    assert spot_datetime("0101", "15-Nov-2026", now) == datetime(2026, 11, 15, 1, 1, tzinfo=timezone.utc)
+    s = parse_spot("DX de W1AW:     28495.0  VP8LP        SSB                             1130Z", now=now)
+    assert s.age_minutes(now) == 30
+    s = parse_spot("   14025.0  JA1ABC      15-Nov-2026 1200Z  CW                  <RA3CO>", now=now)
+    assert s.age_minutes(now) == 24 * 60
+
+
+def test_versions_and_dx_command():
+    from dxclient.core.updates import is_newer, parse_version
+    from dxclient.ui.send_spot import build_dx_command
+
+    assert parse_version("v0.10.2") == (0, 10, 2)
+    assert is_newer("v0.3.0", "0.2.0") and is_newer("v1.0", "0.9.9")
+    assert not is_newer("v0.2.0", "0.2.0") and not is_newer("garbage", "0.2.0")
+    assert build_dx_command(14025.0, "JA1ABC", "  CW   599 ") == "DX 14025.0 JA1ABC CW 599"
+    assert build_dx_command(7074, "UA0SMS", "") == "DX 7074.0 UA0SMS"

@@ -44,6 +44,13 @@ DEFAULTS: dict[str, Any] = {
     "server_enabled": True,  # built-in telnet server for logging programs
     "server_port": 7300,
     "server_allow_lan": False,
+    "locator": "",  # own QTH locator for azimuth / distance
+    "fresh_minutes": 10,  # older spots (e.g. from sh/dx at login) don't alarm and aren't forwarded
+    "dupe_minutes": 10,  # merge repeated spots of a station on the same band/mode (0 = off)
+    "max_age_minutes": 60,  # remove spots older than this (0 = keep)
+    "check_updates": True,
+    "last_update_check": 0.0,
+    "auto_update_cty": True,
     "geometry": None,
     "window_state": None,
 }

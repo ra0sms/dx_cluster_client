@@ -89,3 +89,52 @@ def test_spot_server(app):
     assert srv.client_count == 0
     srv.stop()
     assert not srv.listening
+
+
+def _spot(line, minutes_ago=0):
+    from datetime import datetime, timedelta, timezone
+
+    from dxclient.core.spot import parse_spot
+
+    s = parse_spot(line)
+    s.when = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return s
+
+
+def test_dupes_aging_search(app):
+    from datetime import datetime, timezone
+
+    from dxclient.ui.spot_model import SpotFilterProxy, SpotTableModel
+
+    cw = "DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z"
+    m = SpotTableModel()
+    assert m.add_spot(_spot(cw, 20), dupe_minutes=10) is None
+    assert m.add_spot(_spot(cw, 5), dupe_minutes=10) is None  # 15 min apart → not a dupe
+    old = m.spots[0]
+    assert m.add_spot(_spot(cw, 0), dupe_minutes=10) is old  # 5 min apart → merged
+    assert m.rowCount() == 2 and m.spots[0].count == 2
+    m.add_spot(_spot("DX de W1AW:      28495.0  VP8LP        SSB 59                          1236Z", 90))
+    assert m.rowCount() == 3
+    assert m.remove_older_than(60, datetime.now(timezone.utc)) == 1 and m.rowCount() == 2
+
+    p = SpotFilterProxy()
+    p.setSourceModel(m)
+    m.add_spot(_spot("DX de W1AW:      28495.0  VP8LP        SSB 59                          1236Z"))
+    p.set_search("vp8")
+    assert p.rowCount() == 1
+    p.set_search("ja1")
+    assert p.rowCount() == 2  # two JA1ABC spots 15 min apart (not merged)
+    p.set_search("")
+    assert p.rowCount() == 3
+
+
+def test_settings_dialog_builds(app, tmp_path):
+    from dxclient.core.settings import Settings
+    from dxclient.ui.settings_dialog import SettingsDialog
+
+    s = Settings(tmp_path / "s.json")
+    d = SettingsDialog(s)
+    d.locator.setText("ko85uq")
+    d.dupe.setValue(0)
+    d.apply()
+    assert s["locator"] == "KO85UQ" and s["dupe_minutes"] == 0

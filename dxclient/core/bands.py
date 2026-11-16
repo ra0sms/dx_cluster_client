@@ -31,6 +31,13 @@ BAND_NAMES = [b[0] for b in BANDS]
 MAIN_BANDS = ["160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m"]
 
 MODES = ["CW", "PHONE", "DIGI", "FT8"]
+# Compact labels for tables and buttons ("PH" = phone: SSB / AM / FM)
+_MODE_LABELS = {"PHONE": "PH"}
+
+
+def mode_label(mode: str) -> str:
+    return _MODE_LABELS.get(mode, mode)
+
 
 # Well-known FT8/FT4 dial frequencies (kHz). A spot within ±3 kHz is FT8/FT4.
 _FT8_FREQS = [

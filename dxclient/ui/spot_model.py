@@ -1,16 +1,20 @@
 """Table model for spots + filtering proxy."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QTableView
 
+from ..core.bands import mode_label
 from ..core.filters import SpotFilter
 from ..core.spot import Spot
 from ..i18n import tr
 
-COLUMNS = ["Time", "Freq", "DX", "Country", "Cont", "Band", "Mode", "Comment", "Spotter", "Sp. cont"]
-COL_TIME, COL_FREQ, COL_DX, COL_COUNTRY, COL_CONT, COL_BAND, COL_MODE, COL_COMMENT, COL_SPOTTER, COL_SPCONT = range(10)
+COLUMNS = ["Time", "Freq", "DX", "Country", "Cont", "Az", "km", "Band", "Mode", "Comment", "Spotter", "Sp. cont"]
+(COL_TIME, COL_FREQ, COL_DX, COL_COUNTRY, COL_CONT, COL_AZ, COL_DIST, COL_BAND, COL_MODE, COL_COMMENT,
+ COL_SPOTTER, COL_SPCONT) = range(len(COLUMNS))
 
 BAND_COLORS = {
     "160m": "#8e44ad", "80m": "#2c7fb8", "60m": "#16a085", "40m": "#27ae60",
@@ -18,6 +22,7 @@ BAND_COLORS = {
     "12m": "#6c5ce7", "10m": "#0984e3", "6m": "#e17055",
 }
 ALARM_BG = QColor(255, 196, 0, 90)
+OLD_FG = QColor(128, 128, 128)
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 
@@ -27,6 +32,8 @@ class SpotTableModel(QAbstractTableModel):
         super().__init__(parent)
         self.spots: list[Spot] = []  # newest first
         self.max_rows = max_rows
+        self.fade_minutes = 0  # spots older than this are shown greyed out (0 = never)
+        self._now = datetime.now(timezone.utc)
         self._bold = QFont()
         self._bold.setBold(True)
 
@@ -57,10 +64,14 @@ class SpotTableModel(QAbstractTableModel):
                 return s.country
             if c == COL_CONT:
                 return s.continent
+            if c == COL_AZ:
+                return "" if s.bearing is None else f"{s.bearing}°"
+            if c == COL_DIST:
+                return "" if s.distance is None else str(s.distance)
             if c == COL_BAND:
                 return s.band or ""
             if c == COL_MODE:
-                return tr(s.mode)
+                return mode_label(s.mode)
             if c == COL_COMMENT:
                 return s.comment
             if c == COL_SPOTTER:
@@ -69,14 +80,20 @@ class SpotTableModel(QAbstractTableModel):
                 return s.spotter_continent
         elif role == SORT_ROLE:
             if c == COL_TIME:
-                return s.received.timestamp()
+                return (s.when or s.received).timestamp()
             if c == COL_FREQ:
                 return s.freq
+            if c == COL_AZ:
+                return -1 if s.bearing is None else s.bearing
+            if c == COL_DIST:
+                return -1 if s.distance is None else s.distance
             return self.data(index, Qt.ItemDataRole.DisplayRole)
         elif role == Qt.ItemDataRole.TextAlignmentRole:
-            if c == COL_FREQ:
+            if c in (COL_FREQ, COL_AZ, COL_DIST):
                 return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         elif role == Qt.ItemDataRole.ForegroundRole:
+            if self.fade_minutes and s.age_minutes(self._now) > self.fade_minutes:
+                return OLD_FG
             if c in (COL_BAND, COL_FREQ) and s.band in BAND_COLORS:
                 return QColor(BAND_COLORS[s.band])
         elif role == Qt.ItemDataRole.BackgroundRole:
@@ -88,12 +105,53 @@ class SpotTableModel(QAbstractTableModel):
         elif role == Qt.ItemDataRole.ToolTipRole:
             if c in (COL_DX, COL_COUNTRY) and s.dx_entity:
                 e = s.dx_entity
-                return f"{e.name} ({e.prefix}) — {e.continent}, CQ {e.cq}, ITU {e.itu}"
+                tip = f"{e.name} ({e.prefix}) — {e.continent}, CQ {e.cq}, ITU {e.itu}"
+                if s.count > 1:
+                    tip += "\n" + tr("Spotted {n} times", n=s.count)
+                return tip
             if c == COL_COMMENT:
                 return s.comment
         return None
 
-    def add_spot(self, spot: Spot) -> None:
+    def add_spot(self, spot: Spot, dupe_minutes: int = 0) -> Spot | None:
+        """Insert a spot on top. With dupe_minutes > 0 a previous spot of the same station on the
+        same band and mode within that window is replaced (its counter carried over); the replaced
+        spot is returned, None otherwise."""
+        old = self.find_dupe(spot, dupe_minutes) if dupe_minutes > 0 else None
+        if old is not None:
+            spot.count = old.count + 1
+            row = next(i for i, x in enumerate(self.spots) if x is old)
+            self.beginRemoveRows(QModelIndex(), row, row)
+            del self.spots[row]
+            self.endRemoveRows()
+        self._insert(spot)
+        return old
+
+    def find_dupe(self, spot: Spot, minutes: int) -> Spot | None:
+        t = spot.when or spot.received
+        for s in self.spots:
+            if s.dx == spot.dx and s.band == spot.band and s.mode == spot.mode:
+                if abs((t - (s.when or s.received)).total_seconds()) <= minutes * 60:
+                    return s
+        return None
+
+    def remove_older_than(self, minutes: int, now: datetime) -> int:
+        """Drop spots older than `minutes`; returns how many were removed."""
+        rows = [i for i, s in enumerate(self.spots) if s.age_minutes(now) > minutes]
+        for i in reversed(rows):
+            self.beginRemoveRows(QModelIndex(), i, i)
+            del self.spots[i]
+            self.endRemoveRows()
+        return len(rows)
+
+    def tick(self, now: datetime | None = None) -> None:
+        """Refresh age-dependent colours."""
+        self._now = now or datetime.now(timezone.utc)
+        if self.fade_minutes and self.spots:
+            self.dataChanged.emit(self.index(0, 0), self.index(len(self.spots) - 1, len(COLUMNS) - 1),
+                                  [Qt.ItemDataRole.ForegroundRole])
+
+    def _insert(self, spot: Spot) -> None:
         self.beginInsertRows(QModelIndex(), 0, 0)
         self.spots.insert(0, spot)
         self.endInsertRows()
@@ -131,6 +189,7 @@ class SpotFilterProxy(QSortFilterProxyModel):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.spot_filter: SpotFilter | None = None
+        self.search = ""  # substring of callsign or country
         self.setSortRole(SORT_ROLE)
         self.setDynamicSortFilter(True)
 
@@ -143,11 +202,18 @@ class SpotFilterProxy(QSortFilterProxyModel):
             self.spot_filter = f
             self.invalidateFilter()
 
+    def set_search(self, text: str) -> None:
+        self.beginFilterChange()
+        self.search = text.strip().upper()
+        self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
+
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
-        if self.spot_filter is None:
-            return True
         spot = self.sourceModel().spot_at(source_row)
-        return spot is not None and self.spot_filter.match(spot)
+        if spot is None:
+            return False
+        if self.search and self.search not in spot.dx and self.search not in spot.country.upper():
+            return False
+        return self.spot_filter is None or self.spot_filter.match(spot)
 
     def spot_at(self, proxy_row: int) -> Spot | None:
         src = self.mapToSource(self.index(proxy_row, 0))
@@ -155,8 +221,8 @@ class SpotFilterProxy(QSortFilterProxyModel):
 
 
 # Compact default widths; the Comment column takes the remaining space.
-_COL_WIDTHS = {COL_TIME: 46, COL_FREQ: 72, COL_DX: 92, COL_COUNTRY: 135, COL_CONT: 40,
-               COL_BAND: 50, COL_MODE: 62, COL_SPOTTER: 85, COL_SPCONT: 58}
+_COL_WIDTHS = {COL_TIME: 58, COL_FREQ: 72, COL_DX: 92, COL_COUNTRY: 135, COL_CONT: 40, COL_AZ: 44,
+               COL_DIST: 52, COL_BAND: 50, COL_MODE: 46, COL_SPOTTER: 85, COL_SPCONT: 52}
 
 
 def setup_spot_view(view: QTableView) -> None:

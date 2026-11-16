@@ -40,3 +40,52 @@ def test_single_filter_buttons(app):
 
     QTest.mouseClick(p.bands.buttons["20m"], Qt.MouseButton.LeftButton)
     assert "20m" in got[-1].bands
+
+
+def test_spot_server(app):
+    from PySide6.QtNetwork import QHostAddress, QTcpSocket
+
+    from dxclient.core.filters import SpotFilter
+    from dxclient.core.spot import parse_spot
+    from dxclient.core.telnet_server import SpotServer
+
+    cw = parse_spot("DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z")
+    ft8 = parse_spot("DX de DL1ABC:     7074.0  UA0SMS       FT8 -12dB                      1235Z")
+    flt = SpotFilter(modes={"CW"})
+    history = [cw, ft8]
+    srv = SpotServer(lambda n: [s for s in history if flt.match(s)][:n])
+    assert srv.start(0)  # any free port on 127.0.0.1
+    port = int(srv.address.rsplit(":", 1)[1])
+
+    sock = QTcpSocket()
+    sock.connectToHost(QHostAddress(QHostAddress.SpecialAddress.LocalHost), port)
+    assert sock.waitForConnected(2000)
+    received = bytearray()
+
+    def pump(ms=300):
+        QTest.qWait(ms)
+        received.extend(bytes(sock.readAll().data()))
+
+    pump()
+    assert received.endswith(b"login: ")
+    sock.write(b"n0call\r\n")
+    pump()
+    assert srv.client_count == 1 and b"N0CALL de DXCLIENT" in received
+
+    # main window forwards only filter-passing spots — emulate that here
+    for s in (cw, ft8):
+        if flt.match(s):
+            srv.send_spot(s)
+    pump()
+    assert cw.raw.encode() + b"\r\n" in received and b"UA0SMS" not in received
+
+    received.clear()
+    sock.write(b"sh/dx 5\r\n")
+    pump()
+    assert received.count(b"DX de ") == 1 and b"JA1ABC" in received
+
+    sock.write(b"bye\r\n")
+    pump()
+    assert srv.client_count == 0
+    srv.stop()
+    assert not srv.listening

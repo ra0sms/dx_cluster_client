@@ -131,3 +131,17 @@ def test_strip_telnet():
 
     assert strip_telnet(b"\xff\xfb\x01Hello\xff\xff\r\nlogin: ") == b"Hello\xff\r\nlogin: "
     assert strip_telnet(b"a\xff\xfa\x18\x01\xff\xf0b") == b"ab"
+
+
+def test_dx_line_format():
+    from dxclient.core.spot import format_dx_line
+
+    line = format_dx_line("RA3CO", 14025.0, "JA1ABC", "CW 599", "12:34")
+    assert line == "DX de RA3CO:     14025.0  JA1ABC       CW 599                         1234Z"
+    s = parse_spot(line)
+    assert (s.spotter, s.freq, s.dx, s.comment, s.time) == ("RA3CO", 14025.0, "JA1ABC", "CW 599", "12:34")
+    # original DX de lines are passed through unchanged; sh/dx lines are reformatted
+    raw = "DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z"
+    assert parse_spot(raw).to_dx_line() == raw
+    shdx = parse_spot("   7074.0  UA0SMS      16-Nov-2026 0101Z  FT8 -12dB               <DL1ABC>")
+    assert shdx.to_dx_line().startswith("DX de DL1ABC:     7074.0  UA0SMS       FT8 -12dB")

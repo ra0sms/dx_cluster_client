@@ -22,6 +22,13 @@ class Spot:
     spotter_entity: Entity | None = None
     received: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     alarm: bool = False
+    raw: str = ""  # original cluster line
+
+    def to_dx_line(self) -> str:
+        """Spot as a standard 'DX de' line (the original one when it already was)."""
+        if self.raw.startswith("DX de "):
+            return self.raw
+        return format_dx_line(self.spotter, self.freq, self.dx, self.comment, self.time)
 
     @property
     def country(self) -> str:
@@ -60,6 +67,12 @@ def _clean_spotter(call: str) -> str:
     return re.sub(r"-(#|\d+)$", "", call)
 
 
+def format_dx_line(spotter: str, freq: float, dx: str, comment: str, time: str) -> str:
+    """DXSpider-style fixed-column line: DX de CALL:     14025.0  DXCALL       comment   1234Z"""
+    hhmm = time.replace(":", "")[:4].rjust(4, "0")
+    return f"DX de {spotter + ':':<10}{freq:>8.1f}  {dx:<12} {comment[:30]:<30} {hhmm}Z"
+
+
 def parse_spot(line: str, db: DxccDB | None = None) -> Spot | None:
     line = line.rstrip()
     m = _DX_RE.match(line) or _SHDX_RE.match(line)
@@ -77,6 +90,7 @@ def parse_spot(line: str, db: DxccDB | None = None) -> Spot | None:
         spotter=_clean_spotter(m.group("spotter")),
         comment=comment,
         time=f"{t[:2]}:{t[2:]}",
+        raw=line,
     )
     spot.band = band_of(freq)
     spot.mode = mode_of(freq, comment)

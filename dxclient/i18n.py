@@ -142,6 +142,14 @@ _RU: dict[str, str] = {
     "Callsign lookup URL ({call}):": "URL поиска позывного ({call}):",
     "Language:": "Язык:",
     "General": "Общие",
+    "Built-in telnet server (filtered spots for logging programs)":
+        "Встроенный telnet-сервер (отфильтрованные споты для логгеров)",
+    "Server port:": "Порт сервера:",
+    "Allow connections from the local network (not only 127.0.0.1)":
+        "Разрешить подключения из локальной сети (не только 127.0.0.1)",
+    "Telnet server error: {msg}": "Ошибка telnet-сервера: {msg}",
+    "Telnet {addr}: {n} clients": "Telnet {addr}: клиентов {n}",
+    "Telnet: port {port} unavailable": "Telnet: порт {port} занят",
     "DX cluster client for Linux and Windows.": "Клиент DX-кластера для Linux и Windows.",
 }
 

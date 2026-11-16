@@ -25,6 +25,10 @@ Ready-to-run builds are on the [Releases](https://github.com/ra0sms/dx_cluster_c
 - **Alarm**: a watch list of callsigns, masks (`3Y0*`, `*/MM`) or whole countries, optionally limited to
   bands and modes. The list opens in its own window. Matching spots go to a dedicated tab and trigger a
   sound and a desktop notification.
+- **Built-in telnet server** for logging programs (N1MM, Log4OM, …): connect to `127.0.0.1:7300`
+  and receive only the spots that pass the program's current filters. It accepts any callsign at
+  `login:` and supports `sh/dx [n]` and `bye`. The port, and whether connections from the local network
+  are allowed, are set in *Settings*.
 - **Console**: the raw cluster output and a command line with history (`sh/dx 20`, `sh/wwv`, …).
 - **Clusters**: the list of working nodes from [clusters.ra3co.com](https://clusters.ra3co.com/).
   It is cached and refreshed hourly. You can add your own nodes.

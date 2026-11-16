@@ -49,6 +49,21 @@ class SettingsDialog(QDialog):
         self.lookup = QLineEdit(settings["lookup_url"])
         f.addRow(tr("Callsign lookup URL ({call}):"), self.lookup)
 
+        self.server_enabled = QCheckBox(tr("Built-in telnet server (filtered spots for logging programs)"))
+        self.server_enabled.setChecked(settings["server_enabled"])
+        f.addRow(self.server_enabled)
+        self.server_port = QSpinBox()
+        self.server_port.setRange(1024, 65535)
+        self.server_port.setValue(settings["server_port"])
+        f.addRow(tr("Server port:"), self.server_port)
+        self.server_lan = QCheckBox(tr("Allow connections from the local network (not only 127.0.0.1)"))
+        self.server_lan.setChecked(settings["server_allow_lan"])
+        f.addRow(self.server_lan)
+        self.server_enabled.toggled.connect(self.server_port.setEnabled)
+        self.server_enabled.toggled.connect(self.server_lan.setEnabled)
+        self.server_port.setEnabled(self.server_enabled.isChecked())
+        self.server_lan.setEnabled(self.server_enabled.isChecked())
+
         self.language = QComboBox()
         for code, name in LANGUAGES.items():
             self.language.addItem(name, code)
@@ -72,3 +87,6 @@ class SettingsDialog(QDialog):
         s["alarm_repeat_minutes"] = self.repeat.value()
         s["lookup_url"] = self.lookup.text().strip() or "https://www.qrz.com/db/{call}"
         s["language"] = self.language.currentData()
+        s["server_enabled"] = self.server_enabled.isChecked()
+        s["server_port"] = self.server_port.value()
+        s["server_allow_lan"] = self.server_lan.isChecked()

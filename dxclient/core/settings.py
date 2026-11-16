@@ -41,6 +41,9 @@ DEFAULTS: dict[str, Any] = {
     "alarm_popup": True,
     "alarm_repeat_minutes": 10,
     "lookup_url": "https://www.qrz.com/db/{call}",
+    "server_enabled": True,  # built-in telnet server for logging programs
+    "server_port": 7300,
+    "server_allow_lan": False,
     "geometry": None,
     "window_state": None,
 }

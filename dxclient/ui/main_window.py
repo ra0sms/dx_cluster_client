@@ -19,6 +19,7 @@ from ..core.filters import SpotFilter
 from ..core.settings import Settings, config_dir
 from ..core.spot import Spot, parse_spot
 from ..core.telnet_client import STATE_CONNECTED, STATE_DISCONNECTED, ClusterClient
+from ..core.telnet_server import SpotServer
 from ..i18n import LANGUAGES, tr, translator
 from .alarm_tab import AlarmTab
 from .clusters_tab import ClustersTab
@@ -93,7 +94,16 @@ class MainWindow(QMainWindow):
 
         # ---------------- status bar
         self.count_lbl = QLabel()
+        self.server_lbl = QLabel()
+        self.statusBar().addPermanentWidget(self.server_lbl)
         self.statusBar().addPermanentWidget(self.count_lbl)
+
+        # ---------------- built-in telnet server for logging programs
+        self.server = SpotServer(self._recent_filtered_spots, self)
+        self.server.clients_changed.connect(lambda _n: self._update_server_label())
+        self.server.error.connect(self._server_error)
+        self._server_error_text = ""
+        self._server_cfg: tuple[int, bool] | None = None
 
         # ---------------- tabs
         self.tabs = QTabWidget()
@@ -170,6 +180,7 @@ class MainWindow(QMainWindow):
         translator.language_changed.connect(self.retranslate)
         self.retranslate()
         self._on_state(STATE_DISCONNECTED)
+        self._apply_server_settings()
 
         if settings["geometry"]:
             self.restoreGeometry(QByteArray.fromBase64(settings["geometry"].encode()))
@@ -231,6 +242,7 @@ class MainWindow(QMainWindow):
         self.clusters_tab.retranslate()
         self._on_state(self.client.state)
         self._update_counts()
+        self._update_server_label()
 
     # ================================================================ settings
     def _set(self, key, value) -> None:
@@ -249,6 +261,7 @@ class MainWindow(QMainWindow):
             self.spot_model.set_max_rows(self.s["max_spots"])
             self.alarms.repeat_minutes = self.s["alarm_repeat_minutes"]
             self.client.auto_reconnect = self.s["auto_reconnect"]
+            self._apply_server_settings()
             translator.set_language(self.s["language"])
             for a in self.lang_menu.actions():
                 a.setChecked(a.text() == LANGUAGES.get(self.s["language"]))
@@ -318,10 +331,53 @@ class MainWindow(QMainWindow):
         if entry:
             spot.alarm = True
         self.spot_model.add_spot(spot)
+        if self.server.listening and self._passes_filter(spot):
+            self.server.send_spot(spot)
         if entry:
             self.alarm_tab.model.add_spot(spot)
             if self.alarms.should_notify(spot):
                 self._notify(spot, entry)
+
+    # ================================================================ telnet server
+    def _passes_filter(self, spot: Spot) -> bool:
+        f = self.proxy.spot_filter
+        return f is None or f.match(spot)
+
+    def _recent_filtered_spots(self, n: int) -> list[Spot]:
+        out: list[Spot] = []
+        for s in self.spot_model.spots:  # newest first
+            if self._passes_filter(s):
+                out.append(s)
+                if len(out) >= n:
+                    break
+        return out
+
+    def _apply_server_settings(self) -> None:
+        self._server_error_text = ""
+        port, lan = self.s["server_port"], self.s["server_allow_lan"]
+        if not self.s["server_enabled"]:
+            self.server.stop()
+        elif not (self.server.listening and self._server_cfg == (port, lan)):
+            self.server.start(port, lan)
+        self._server_cfg = (port, lan)
+        self._update_server_label()
+
+    def _server_error(self, msg: str) -> None:
+        self._server_error_text = msg
+        self._update_server_label()
+        self.statusBar().showMessage(tr("Telnet server error: {msg}", msg=msg), 10000)
+
+    def _update_server_label(self) -> None:
+        if self.server.listening:
+            self.server_lbl.setText(tr("Telnet {addr}: {n} clients", addr=self.server.address,
+                                       n=self.server.client_count))
+            self.server_lbl.setStyleSheet("")
+        elif self.s["server_enabled"] and self._server_error_text:
+            self.server_lbl.setText(tr("Telnet: port {port} unavailable", port=self.s["server_port"]))
+            self.server_lbl.setStyleSheet("color: #c0392b;")
+        else:
+            self.server_lbl.setText("")
+        self.server_lbl.setToolTip(self._server_error_text)
 
     def _notify(self, spot: Spot, entry: AlarmEntry) -> None:
         if self.tabs.currentWidget() is not self.alarm_tab:
@@ -438,6 +494,7 @@ class MainWindow(QMainWindow):
         self.s["window_state"] = bytes(self.saveState(self.STATE_VERSION).toBase64()).decode()
         self.s.save()
         self.client.disconnect_from()
+        self.server.stop()
         if self.tray:
             self.tray.hide()
         super().closeEvent(e)

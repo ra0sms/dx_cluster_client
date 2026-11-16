@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=DX Cluster Client
+Comment=DX cluster telnet client
+Comment[ru]=Клиент DX-кластера
+Exec=DXClusterClient
+Icon=dxclusterclient
+Categories=Network;HamRadio;
+Terminal=false

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dxclusterclient"
+version = "0.1.0"
+description = "DX cluster telnet client for Linux and Windows (bands/countries/continents filters, alarm watch list)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["PySide6>=6.6"]
+
+[project.optional-dependencies]
+dev = ["pytest", "pyinstaller"]
+
+[project.gui-scripts]
+dxclusterclient = "dxclient.app:main"
+
+[tool.setuptools.packages.find]
+include = ["dxclient*"]
+
+[tool.setuptools.package-data]
+dxclient = ["data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

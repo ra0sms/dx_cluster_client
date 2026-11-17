@@ -3,7 +3,13 @@
 **English** | [Русский](README.ru.md)
 
 A DX cluster telnet client for Linux and Windows, in the spirit of VE7CC CC User.
-Written in Python with PySide6 (Qt 6).
+Written in Python 3.10+ with PySide6 (Qt 6).
+
+## Screenshots
+
+![DX Cluster Client main window: spot table, filters and solar indices](pics/dx_cluster_en.png)
+
+*Spots, filters, solar indices and the built-in telnet server in one window.*
 
 ## Download
 
@@ -25,9 +31,9 @@ Ready-to-run builds are on the [Releases](https://github.com/ra0sms/dx_cluster_c
   the spot comment, or from the band plan when the comment has none. Double-click a spot to look the
   callsign up on QRZ.com.
 - **Spot handling**: repeated spots of a station on the same band and mode are merged into one row
-  with a counter. Spots older than a set age (60 min by default) are removed, and from half that age
-  they are greyed out. Old spots, such as those from `sh/dx` right after login, are shown but do not
-  trigger Alarm and are not forwarded to loggers.
+  (the number of spots is shown in the tooltip). Spots older than a set age (60 min by default) are
+  removed, and from half that age they are greyed out. Old spots, such as those from `sh/dx` right
+  after login, are shown but do not trigger Alarm and are not forwarded to loggers.
 - **Azimuth and distance**: set your QTH locator in *Settings* to get the beam heading and distance to
   each DX country.
 - **Search** by callsign or country above the spot table, and **Send spot…** to post your own spot
@@ -35,9 +41,12 @@ Ready-to-run builds are on the [Releases](https://github.com/ra0sms/dx_cluster_c
 - **Filters**: applied in the client, instantly. Filter by band, mode, DX continent, spotter continent
   and country (only the selected countries, or all except them). Filter sets can be saved as presets.
 - **Alarm**: a watch list of callsigns, masks (`3Y0*`, `*/MM`) or whole countries, optionally limited to
-  bands and modes. The list opens in its own window. Matching spots go to a dedicated tab and trigger a
-  sound and a desktop notification. Matches older than 24 hours are removed automatically (configurable);
-  *View → Clear all spots and Alarm matches* (Ctrl+L) empties both tables at once.
+  bands and modes. Callsigns and masks are entered in uppercase automatically (country names keep their
+  normal case), and the same rule cannot be added twice. The list opens in its own window and can be
+  sorted by name with the *Sort by name* button or by clicking the *Pattern* header. Matching spots go to
+  a dedicated tab and trigger a sound and a desktop notification. Matches older than 24 hours are removed
+  automatically (configurable); *View → Clear all spots and Alarm matches* (Ctrl+L) empties both tables
+  at once.
 - **Built-in telnet server** for logging programs (N1MM, Log4OM, …): connect to `127.0.0.1:7300`
   and receive only the spots that pass the program's current filters. It accepts any callsign at
   `login:` and supports `sh/dx [n]` and `bye`. The port, and whether connections from the local network
@@ -47,7 +56,8 @@ Ready-to-run builds are on the [Releases](https://github.com/ra0sms/dx_cluster_c
   values are highlighted.
 - **Console**: the raw cluster output and a command line with history (`sh/dx 20`, `sh/wwv`, …).
 - **Clusters**: the list of working nodes from [clusters.ra3co.com](https://clusters.ra3co.com/).
-  It is cached and refreshed hourly. You can add your own nodes.
+  It is cached; the list is refreshed at startup when the cache is older than an hour, and the
+  *Refresh list* button updates it at any time. You can add your own nodes.
 - **Updates**: the app checks GitHub for a new version once a day and refreshes `cty.dat` automatically
   when it is older than 30 days. Both can be turned off in *Settings*.
 - **Error log**: `dxclient.log` in the settings folder (*Help → Open settings and log folder*).
@@ -98,11 +108,12 @@ Or on Linux under Wine in a container: `bash packaging/build_windows.sh`.
 ```
 dxclient/
   core/      telnet client, spot parser, DXCC (cty.dat), bands/modes, filters, alarms, cluster list
-  ui/        main window and tabs (PySide6)
+  ui/        main window, tabs and Qt compatibility helpers (PySide6)
   i18n.py    ru/en translations
   data/      cty.dat, icon, alarm sound
 packaging/   AppImage / Windows build scripts, icons, .desktop file
-tests/       pytest tests
+pics/        screenshots used in this README
+tests/       pytest tests (core, UI, hardening, clock history)
 ```
 
 ## License

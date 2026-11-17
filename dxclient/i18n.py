@@ -142,6 +142,17 @@ _RU: dict[str, str] = {
     "Callsign lookup URL ({call}):": "URL поиска позывного ({call}):",
     "Language:": "Язык:",
     "General": "Общие",
+    "PC clock is off by {n} min (corrected automatically)": "Часы ПК расходятся с кластером на {n} мин (учтено)",
+    "Spot ages are computed with the cluster time. Please synchronise the computer clock and time zone.":
+        "Возраст спотов считается по времени кластера. Синхронизируйте часы и часовой пояс компьютера.",
+    "The settings file was damaged and has been reset. A copy was kept:\n{msg}":
+        "Файл настроек был повреждён, настройки сброшены. Копия сохранена:\n{msg}",
+    "View": "Вид",
+    "h": "ч",
+    "Remove Alarm matches older than:": "Удалять совпадения Alarm старше:",
+    "Clear all spots and Alarm matches": "Очистить все споты и совпадения Alarm",
+    "Remove all spots from the table (Alarm matches are kept)":
+        "Удалить все споты из таблицы (совпадения Alarm остаются)",
     "Az": "Аз",
     "km": "км",
     "Spotted {n} times": "Спотов: {n}",

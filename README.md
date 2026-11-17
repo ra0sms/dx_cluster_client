@@ -16,7 +16,10 @@ Ready-to-run builds are on the [Releases](https://github.com/ra0sms/dx_cluster_c
 
 - **Connection**: connects to a telnet DX cluster, by default **RA3CO-2 (`ra3co.com:7373`)**. Logs in
   with your callsign, sends your commands after login, keeps the connection alive and reconnects
-  automatically.
+  automatically, including when the link silently stalls (no data for 15 minutes).
+- **Clock correction**: spot ages are computed with the cluster's time, so a PC clock that is off by
+  minutes or a wrong time zone does not hide spots. A warning appears in the status bar when the PC
+  clock differs from the cluster by more than 5 minutes.
 - **Spots**: a table with country, continent, band and mode (CW / PH / DIGI / FT8, where PH means phone:
   SSB, AM or FM). The mode comes from
   the spot comment, or from the band plan when the comment has none. Double-click a spot to look the
@@ -33,7 +36,8 @@ Ready-to-run builds are on the [Releases](https://github.com/ra0sms/dx_cluster_c
   and country (only the selected countries, or all except them). Filter sets can be saved as presets.
 - **Alarm**: a watch list of callsigns, masks (`3Y0*`, `*/MM`) or whole countries, optionally limited to
   bands and modes. The list opens in its own window. Matching spots go to a dedicated tab and trigger a
-  sound and a desktop notification.
+  sound and a desktop notification. Matches older than 24 hours are removed automatically (configurable);
+  *View → Clear all spots and Alarm matches* (Ctrl+L) empties both tables at once.
 - **Built-in telnet server** for logging programs (N1MM, Log4OM, …): connect to `127.0.0.1:7300`
   and receive only the spots that pass the program's current filters. It accepts any callsign at
   `login:` and supports `sh/dx [n]` and `bye`. The port, and whether connections from the local network

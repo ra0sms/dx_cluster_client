@@ -1,7 +1,9 @@
 """Asynchronous telnet client for DX clusters based on QTcpSocket."""
 from __future__ import annotations
 
+import logging
 import re
+import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtNetwork import QAbstractSocket, QTcpSocket
@@ -15,9 +17,15 @@ STATE_CONNECTING = "connecting"
 STATE_CONNECTED = "connected"
 STATE_RECONNECT_WAIT = "reconnect_wait"
 
+log = logging.getLogger("dxclient.telnet")
+_MAX_PARTIAL = 64 * 1024  # a "line" without newline longer than this is flushed as is
 
-def strip_telnet(data: bytes, sock: QTcpSocket | None = None) -> bytes:
-    """Remove telnet IAC negotiation, refusing every option (WONT/DONT)."""
+
+def strip_telnet_stream(data: bytes, sock: QTcpSocket | None = None) -> tuple[bytes, bytes]:
+    """Remove telnet IAC negotiation, refusing every option (WONT/DONT).
+
+    Returns (clean data, unfinished IAC sequence at the end) — the latter must be prepended
+    to the next chunk, because TCP can split a command between packets."""
     out = bytearray()
     i, n = 0, len(data)
     while i < n:
@@ -27,23 +35,45 @@ def strip_telnet(data: bytes, sock: QTcpSocket | None = None) -> bytes:
             i += 1
             continue
         if i + 1 >= n:
-            break
+            return bytes(out), data[i:]
         cmd = data[i + 1]
         if cmd == IAC:
             out.append(IAC)
             i += 2
         elif cmd in (251, 252, 253, 254):  # WILL WONT DO DONT
-            if i + 2 < n and sock is not None:
-                opt = data[i + 2]
+            if i + 2 >= n:
+                return bytes(out), data[i:]
+            if sock is not None:
                 reply = 254 if cmd in (251, 252) else 252  # DONT / WONT
-                sock.write(bytes([IAC, reply, opt]))
+                sock.write(bytes([IAC, reply, data[i + 2]]))
             i += 3
         elif cmd == 250:  # SB ... IAC SE
             end = data.find(bytes([IAC, 240]), i + 2)
-            i = n if end < 0 else end + 2
+            if end < 0:
+                rest = data[i:]
+                return bytes(out), (rest if len(rest) < 4096 else b"")
+            i = end + 2
         else:
             i += 2
-    return bytes(out)
+    return bytes(out), b""
+
+
+def strip_telnet(data: bytes, sock: QTcpSocket | None = None) -> bytes:
+    return strip_telnet_stream(data, sock)[0]
+
+
+def decode_line(raw: bytes) -> str:
+    """UTF-8, falling back to cp1251 (common on Russian nodes) for invalid UTF-8."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1251", "replace")
+
+
+def split_lines(buf: bytes) -> tuple[list[str], bytes]:
+    """Split a byte buffer into complete decoded lines and the unfinished rest."""
+    *lines, rest = buf.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+    return [decode_line(l).replace("\x07", "") for l in lines], rest
 
 
 class ClusterClient(QObject):
@@ -53,6 +83,10 @@ class ClusterClient(QObject):
     error = Signal(str)
 
     KEEPALIVE_MS = 5 * 60 * 1000
+    # Nothing received for this long → the connection is assumed dead and re-established.
+    # The keepalive (empty line every 5 min) makes clusters answer with a prompt, so a healthy
+    # connection is never silent that long.
+    WATCHDOG_S = 15 * 60
     RECONNECT_DELAYS = [5, 10, 30, 60, 120]
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -70,7 +104,9 @@ class ClusterClient(QObject):
         self._sock.readyRead.connect(self._on_ready_read)
         self._sock.errorOccurred.connect(self._on_error)
 
-        self._buf = ""
+        self._buf = b""
+        self._iac_rest = b""
+        self._last_rx = time.monotonic()
         self._logged_in = False
         self._user_disconnect = False
         self._attempt = 0
@@ -85,6 +121,12 @@ class ClusterClient(QObject):
         self._login_fallback = QTimer(self)
         self._login_fallback.setSingleShot(True)
         self._login_fallback.timeout.connect(self._send_login)
+        self._after_login_timer = QTimer(self)
+        self._after_login_timer.setSingleShot(True)
+        self._after_login_timer.timeout.connect(self._after_login)
+        self._watchdog = QTimer(self)
+        self._watchdog.setInterval(60_000)
+        self._watchdog.timeout.connect(self._check_watchdog)
 
     # ------------------------------------------------------------------ API
     @property
@@ -103,6 +145,8 @@ class ClusterClient(QObject):
         self._reconnect.stop()
         self._keepalive.stop()
         self._login_fallback.stop()
+        self._after_login_timer.stop()
+        self._watchdog.stop()
         if self._sock.state() != QAbstractSocket.SocketState.UnconnectedState:
             if self._sock.state() == QAbstractSocket.SocketState.ConnectedState:
                 self.send("bye")
@@ -121,7 +165,8 @@ class ClusterClient(QObject):
             self.state_changed.emit(st)
 
     def _do_connect(self) -> None:
-        self._buf = ""
+        self._buf = b""
+        self._iac_rest = b""
         self._logged_in = False
         self._set_state(STATE_CONNECTING)
         self._sock.abort()
@@ -130,17 +175,31 @@ class ClusterClient(QObject):
     def _on_connected(self) -> None:
         self._attempt = 0
         self._set_state(STATE_CONNECTED)
+        log.info("connected to %s:%s", self.host, self.port)
+        self._last_rx = time.monotonic()
         self._keepalive.start()
+        self._watchdog.start()
         # Some nodes never print a recognisable prompt — log in anyway after a pause.
         self._login_fallback.start(8000)
 
     def _on_disconnected(self) -> None:
         self._keepalive.stop()
         self._login_fallback.stop()
+        self._after_login_timer.stop()
+        self._watchdog.stop()
         if self._buf:
-            self.line_received.emit(self._buf)
-            self._buf = ""
+            self.line_received.emit(decode_line(self._buf))
+            self._buf = b""
+        log.info("disconnected from %s:%s", self.host, self.port)
         self._schedule_reconnect()
+
+    def _check_watchdog(self) -> None:
+        silent = time.monotonic() - self._last_rx
+        if silent > self.WATCHDOG_S and self._sock.state() == QAbstractSocket.SocketState.ConnectedState:
+            msg = f"no data from the cluster for {int(silent // 60)} min, reconnecting"
+            log.warning(msg)
+            self.error.emit(msg)
+            self._sock.abort()  # → disconnected → automatic reconnect
 
     def _on_error(self, _err) -> None:
         self.error.emit(self._sock.errorString())
@@ -168,7 +227,7 @@ class ClusterClient(QObject):
         self._logged_in = True
         self._login_fallback.stop()
         self.send(self.callsign)
-        QTimer.singleShot(1500, self._after_login)
+        self._after_login_timer.start(1500)
 
     def _after_login(self) -> None:
         for cmd in self.login_commands:
@@ -178,25 +237,23 @@ class ClusterClient(QObject):
         self.logged_in.emit()
 
     def _on_ready_read(self) -> None:
-        raw = bytes(self._sock.readAll().data())
-        data = strip_telnet(raw, self._sock)
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            text = data.decode("latin-1")
-        text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x07", "")
-        self._buf += text
-        *lines, self._buf = self._buf.split("\n")
+        self._last_rx = time.monotonic()
+        raw = self._iac_rest + bytes(self._sock.readAll().data())
+        data, self._iac_rest = strip_telnet_stream(raw, self._sock)
+        lines, self._buf = split_lines(self._buf + data)
         for line in lines:
             self.line_received.emit(line)
+        if len(self._buf) > _MAX_PARTIAL:
+            self.line_received.emit(decode_line(self._buf))
+            self._buf = b""
         # Prompts come without a trailing newline
-        tail = self._buf.strip()
+        tail = self._buf.decode("utf-8", "replace").strip()
         if tail:
             if not self._logged_in and _LOGIN_RE.search(tail):
-                self.line_received.emit(self._buf)
-                self._buf = ""
+                self.line_received.emit(decode_line(self._buf))
+                self._buf = b""
                 self._send_login()
             elif self._logged_in and self.password and _PASSWORD_RE.search(tail):
-                self.line_received.emit(self._buf)
-                self._buf = ""
+                self.line_received.emit(decode_line(self._buf))
+                self._buf = b""
                 self.send(self.password)

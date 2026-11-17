@@ -74,9 +74,12 @@ class AlarmList:
     def should_notify(self, s: Spot, now: float | None = None) -> bool:
         """True if this call/band/mode was not notified within repeat_minutes."""
         now = time.monotonic() if now is None else now
+        window = self.repeat_minutes * 60
         key = (s.dx, s.band, s.mode)
         last = self._last.get(key)
-        if last is not None and now - last < self.repeat_minutes * 60:
+        if last is not None and now - last < window:
             return False
         self._last[key] = now
+        if len(self._last) > 500:  # forget stations not heard within the window
+            self._last = {k: t for k, t in self._last.items() if now - t < window}
         return True

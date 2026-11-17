@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QAbstractSocket, QHostAddress, QTcpServer, QTcpSocket
 
-from .spot import Spot
-from .telnet_client import strip_telnet
+from .spot import Spot, cluster_date
+from .telnet_client import split_lines, strip_telnet_stream
 
 NODE_NAME = "DXCLIENT"
 _SHDX_RE = re.compile(r"^sh(o(w)?)?/dx(\s+(\d+))?", re.I)
@@ -24,7 +24,8 @@ class _Session:
     def __init__(self, sock: QTcpSocket) -> None:
         self.sock = sock
         self.call = ""
-        self.buf = ""
+        self.buf = b""
+        self.iac_rest = b""
 
     @property
     def ready(self) -> bool:
@@ -85,8 +86,8 @@ class SpotServer(QObject):
             s.sock.write((text + "\r\n").encode("utf-8", "replace"))
 
     def _prompt(self, s: _Session) -> None:
-        now = datetime.now(timezone.utc).strftime("%d-%b-%Y %H%MZ")
-        s.sock.write(f"{s.call} de {NODE_NAME} {now} >\r\n".encode())
+        now = datetime.now(timezone.utc)
+        s.sock.write(f"{s.call} de {NODE_NAME} {cluster_date(now)} {now:%H%M}Z >\r\n".encode())
 
     def _on_new_connection(self) -> None:
         while self._server.hasPendingConnections():
@@ -107,11 +108,10 @@ class SpotServer(QObject):
         s = self._sessions.get(sock)
         if s is None:
             return
-        data = strip_telnet(bytes(sock.readAll().data()), sock)
-        s.buf += data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
-        if len(s.buf) > _MAX_LINE and "\n" not in s.buf:
-            s.buf = ""  # garbage without newlines
-        *lines, s.buf = s.buf.split("\n")
+        data, s.iac_rest = strip_telnet_stream(s.iac_rest + bytes(sock.readAll().data()), sock)
+        lines, s.buf = split_lines(s.buf + data)
+        if len(s.buf) > _MAX_LINE:
+            s.buf = b""  # garbage without newlines
         for line in lines:
             self._handle(s, line.strip())
 

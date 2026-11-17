@@ -101,6 +101,26 @@ def spot_datetime(hhmm: str, date_str: str | None, now: datetime) -> datetime:
     return t
 
 
+def nearest_datetime(hhmm: str, ref: datetime) -> datetime:
+    """The moment with time-of-day HHMM closest to `ref` (within ±12 h). Used for live spots:
+    gives the real spot time even when the PC clock is wrong by minutes or hours."""
+    h, m = int(hhmm[:2]) % 24, int(hhmm[2:4]) % 60
+    t = ref.replace(hour=h, minute=m, second=0, microsecond=0)
+    if t - ref > timedelta(hours=12):
+        t -= timedelta(days=1)
+    elif ref - t > timedelta(hours=12):
+        t += timedelta(days=1)
+    return t
+
+
+MONTHS_EN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def cluster_date(t: datetime) -> str:
+    """'17-Nov-2026' independent of the system locale."""
+    return f"{t.day}-{MONTHS_EN[t.month - 1]}-{t.year}"
+
+
 def parse_spot(line: str, db: DxccDB | None = None, now: datetime | None = None) -> Spot | None:
     line = line.rstrip()
     m = _DX_RE.match(line) or _SHDX_RE.match(line)

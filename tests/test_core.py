@@ -222,3 +222,61 @@ def test_versions_and_dx_command():
     assert not is_newer("v0.2.0", "0.2.0") and not is_newer("garbage", "0.2.0")
     assert build_dx_command(14025.0, "JA1ABC", "  CW   599 ") == "DX 14025.0 JA1ABC CW 599"
     assert build_dx_command(7074, "UA0SMS", "") == "DX 7074.0 UA0SMS"
+
+
+def test_clock_sync():
+    from datetime import datetime, timezone
+
+    from dxclient.core.clock import ClockSync
+
+    pc = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
+    c = ClockSync(min_samples=3)
+    c.feed("1215", pc)
+    c.feed("1214", pc)
+    assert not c.calibrated and c.offset_minutes == 0 and c.now(pc) == pc
+    c.feed("1215", pc)
+    assert c.calibrated and c.offset_minutes == 15 and c.clock_is_off  # PC 15 min slow
+    # wrap around midnight: PC 23:58, cluster already 00:03 → +5
+    c2 = ClockSync(min_samples=1)
+    c2.feed("0003", datetime(2026, 11, 17, 23, 58, tzinfo=timezone.utc))
+    assert c2.offset_minutes == 5 and not c2.clock_is_off
+
+
+def test_telnet_stream_helpers():
+    from dxclient.core.telnet_client import split_lines, strip_telnet_stream
+
+    # IAC WILL split between two TCP packets
+    out, rest = strip_telnet_stream(b"hello\xff\xfb")
+    assert out == b"hello" and rest == b"\xff\xfb"
+    out, rest = strip_telnet_stream(rest + b"\x01world")
+    assert out == b"world" and rest == b""
+    # a Cyrillic letter split between packets is decoded correctly once the line is complete
+    data = "DX de UA3AB: 14025.0 R1ABC привет 1234Z\n".encode()
+    cut = data.index("и".encode()) + 1
+    lines, buf = split_lines(data[:cut])
+    assert lines == [] and buf
+    lines, buf = split_lines(buf + data[cut:])
+    assert lines == ["DX de UA3AB: 14025.0 R1ABC привет 1234Z"] and buf == b""
+    # cp1251 fallback
+    lines, _ = split_lines("тест\r\n".encode("cp1251"))
+    assert lines == ["тест"]
+
+
+def test_damaged_settings_are_kept(tmp_path):
+    from dxclient.core.settings import Settings
+
+    p = tmp_path / "settings.json"
+    p.write_text("{ broken json", encoding="utf-8")
+    s = Settings(p)
+    assert s.load_error and not p.exists()
+    backups = list(tmp_path.glob("settings.json.bad-*"))
+    assert len(backups) == 1 and backups[0].read_text() == "{ broken json"
+    assert s["max_spots"] == 2000  # defaults
+
+
+def test_alarm_history_is_pruned():
+    al = AlarmList([AlarmEntry("*")], repeat_minutes=10)
+    for i in range(600):
+        s = parse_spot(f"DX de W1AW:     14025.0  K{i}AA        CW                              1234Z")
+        al.should_notify(s, now=float(i * 2))  # one new station every 2 s
+    assert len(al._last) <= 501

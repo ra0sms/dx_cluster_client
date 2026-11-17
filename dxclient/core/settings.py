@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +50,7 @@ DEFAULTS: dict[str, Any] = {
     "fresh_minutes": 10,  # older spots (e.g. from sh/dx at login) don't alarm and aren't forwarded
     "dupe_minutes": 10,  # merge repeated spots of a station on the same band/mode (0 = off)
     "max_age_minutes": 60,  # remove spots older than this (0 = keep)
+    "alarm_max_age_hours": 24,  # remove Alarm matches older than this (0 = keep)
     "check_updates": True,
     "last_update_check": 0.0,
     "auto_update_cty": True,
@@ -60,15 +63,32 @@ class Settings:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (config_dir() / "settings.json")
         self.data: dict[str, Any] = json.loads(json.dumps(DEFAULTS))
+        self.load_error: str = ""  # set when a damaged settings file was moved aside
         self.load()
 
     def load(self) -> None:
         try:
-            stored = json.loads(self.path.read_text(encoding="utf-8"))
-            if isinstance(stored, dict):
-                self.data.update(stored)
-        except (OSError, ValueError):
-            pass
+            text = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            self.load_error = str(e)
+            return
+        try:
+            stored = json.loads(text)
+            if not isinstance(stored, dict):
+                raise ValueError("not a JSON object")
+        except ValueError as e:
+            # Keep the damaged file for the user instead of silently overwriting it with defaults.
+            backup = self.path.with_name(f"{self.path.name}.bad-{datetime.now():%Y%m%d-%H%M%S}")
+            try:
+                self.path.replace(backup)
+            except OSError:
+                backup = self.path
+            self.load_error = f"{e} → {backup}"
+            logging.getLogger("dxclient").error("damaged settings file moved to %s: %s", backup, e)
+            return
+        self.data.update(stored)
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")

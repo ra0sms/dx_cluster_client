@@ -127,6 +127,15 @@ class SpotTableModel(QAbstractTableModel):
         self._insert(spot)
         return old
 
+    def has_exact(self, spot: Spot) -> bool:
+        """The very same spot (call, frequency, time, spotter) is already in the table —
+        e.g. sh/dx output repeated after a reconnect."""
+        for s in self.spots:
+            if (s.dx == spot.dx and s.when == spot.when and s.spotter == spot.spotter
+                    and abs(s.freq - spot.freq) < 0.05):
+                return True
+        return False
+
     def find_dupe(self, spot: Spot, minutes: int) -> Spot | None:
         t = spot.when or spot.received
         for s in self.spots:

@@ -18,13 +18,14 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..core.alarms import KIND_COUNTRY, AlarmEntry, AlarmList
 from ..core.bands import mode_label
+from ..core.clock import ClockSync
 from ..core.cluster_list import parse_address
 from ..core.dxcc import DxccDB
 from ..core.filters import SpotFilter
 from ..core.geo import bearing_distance, locator_to_latlon
 from ..core.settings import Settings, config_dir
 from ..core.solar import SolarData, SolarFetcher
-from ..core.spot import Spot, parse_spot
+from ..core.spot import Spot, nearest_datetime, parse_spot
 from ..core.telnet_client import STATE_CONNECTED, STATE_DISCONNECTED, ClusterClient
 from ..core.telnet_server import SpotServer
 from ..core.updates import RELEASES_PAGE, UpdateChecker
@@ -76,6 +77,7 @@ class MainWindow(QMainWindow):
         )
         self.unread_alarms = 0
         self.home = locator_to_latlon(settings["locator"]) if settings["locator"] else None
+        self.clock = ClockSync()
         self.setWindowIcon(QIcon(str(DATA_DIR / "icon.svg")))
         self.resize(1200, 750)
 
@@ -120,6 +122,10 @@ class MainWindow(QMainWindow):
 
         # ---------------- status bar
         self.count_lbl = QLabel()
+        self.clock_lbl = QLabel()
+        self.clock_lbl.setStyleSheet("color: #c0392b;")
+        self.clock_lbl.hide()
+        self.statusBar().addPermanentWidget(self.clock_lbl)
         self.server_lbl = QLabel()
         self.statusBar().addPermanentWidget(self.server_lbl)
         self.statusBar().addPermanentWidget(self.count_lbl)
@@ -163,6 +169,9 @@ class MainWindow(QMainWindow):
         self.send_spot_btn = QPushButton()
         self.send_spot_btn.clicked.connect(lambda: self._send_spot_dialog())
         row.addWidget(self.search)
+        self.clear_spots_btn = QPushButton()
+        self.clear_spots_btn.clicked.connect(self._clear_spots)
+        row.addWidget(self.clear_spots_btn)
         row.addStretch(1)
         row.addWidget(self.send_spot_btn)
         sp.addLayout(row)
@@ -243,10 +252,18 @@ class MainWindow(QMainWindow):
         self.update_lbl.setOpenExternalLinks(True)
         self.update_lbl.hide()
         self.statusBar().addWidget(self.update_lbl)
-        if settings["check_updates"] and time.time() - settings["last_update_check"] > UPDATE_CHECK_INTERVAL:
-            QTimer.singleShot(3000, self._auto_update_check)
-        if settings["auto_update_cty"] and self._cty_outdated():
-            QTimer.singleShot(5000, lambda: self._update_cty(silent=True))
+        self._last_cty_attempt = 0.0
+        QTimer.singleShot(3000, self._periodic_checks)
+        # the program may stay open for weeks: repeat the daily checks every hour
+        self.daily_timer = QTimer(self)
+        self.daily_timer.setInterval(3600_000)
+        self.daily_timer.timeout.connect(self._periodic_checks)
+        self.daily_timer.start()
+        if settings.load_error:
+            QTimer.singleShot(500, lambda: QMessageBox.warning(
+                self, tr("Settings"),
+                tr("The settings file was damaged and has been reset. A copy was kept:\n{msg}",
+                   msg=settings.load_error)))
 
         if settings["geometry"]:
             self.restoreGeometry(QByteArray.fromBase64(settings["geometry"].encode()))
@@ -273,6 +290,9 @@ class MainWindow(QMainWindow):
 
         self.view_menu = mb.addMenu("")
         self.view_menu.addAction(self.filter_dock.toggleViewAction())
+        self.view_menu.addSeparator()
+        self.act_clear_all = self.view_menu.addAction("", self._clear_all)
+        self.act_clear_all.setShortcut("Ctrl+L")
 
         self.lang_menu = mb.addMenu("")
         group = QActionGroup(self)
@@ -298,7 +318,10 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(3, tr("Clusters"))
         self.filter_dock.setWindowTitle(tr("Filters"))
         self.file_menu.setTitle(tr("File"))
-        self.view_menu.setTitle(tr("Filters"))
+        self.view_menu.setTitle(tr("View"))
+        self.act_clear_all.setText(tr("Clear all spots and Alarm matches"))
+        self.clear_spots_btn.setText(tr("Clear"))
+        self.clear_spots_btn.setToolTip(tr("Remove all spots from the table (Alarm matches are kept)"))
         self.act_settings.setText(tr("Settings..."))
         self.act_cty.setText(tr("Update cty.dat"))
         self.act_quit.setText(tr("Quit"))
@@ -403,12 +426,25 @@ class MainWindow(QMainWindow):
     # ================================================================ spots
     def _on_line(self, line: str) -> None:
         self.console.append(line)
-        spot = parse_spot(line, self.db)
+        local = datetime.now(timezone.utc)
+        spot = parse_spot(line, self.db, now=self.clock.now(local))
         if spot is None:
             return
-        age = spot.age_minutes()
+        live = spot.raw.startswith("DX de ")
+        if live:  # live spot: its HHMM is (almost) the current cluster time → calibrates the PC clock
+            hhmm = spot.time.replace(":", "")
+            self.clock.feed(hhmm, local)
+            spot.when = nearest_datetime(hhmm, self.clock.now(local))
+            self._update_clock_label()
+        now = self.clock.now(local)
+        if self.spot_model.has_exact(spot):
+            return  # the same spot again (sh/dx repeated after a reconnect)
+        age = spot.age_minutes(now)  # never negative: "future" spots count as current
+        # Until the clock is calibrated it may be wrong by hours: never drop a live spot then,
+        # but still keep obviously old ones quiet (no alarm / forwarding) when the clock is right.
+        drop_age = 0.0 if live and not self.clock.calibrated else age
         max_age = self.s["max_age_minutes"]
-        if max_age and age > max_age:
+        if max_age and drop_age > max_age:
             return  # e.g. hours-old spots from sh/dx: not worth showing
         fresh = not self.s["fresh_minutes"] or age <= self.s["fresh_minutes"]
         self._apply_geo(spot)
@@ -443,18 +479,43 @@ class MainWindow(QMainWindow):
 
     # ================================================================ aging
     def _apply_age_settings(self) -> None:
-        fade = self.s["max_age_minutes"] // 2
-        self.spot_model.fade_minutes = fade
-        self.alarm_tab.model.fade_minutes = fade
+        self.spot_model.fade_minutes = self.s["max_age_minutes"] // 2
+        self.alarm_tab.model.fade_minutes = self.s["alarm_max_age_hours"] * 60 // 2
         self._age_tick()
 
     def _age_tick(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = self.clock.now()
         if self.s["max_age_minutes"]:
             self.spot_model.remove_older_than(self.s["max_age_minutes"], now)
+        if self.s["alarm_max_age_hours"]:
+            self.alarm_tab.model.remove_older_than(self.s["alarm_max_age_hours"] * 60, now)
         self.spot_model.tick(now)
         self.alarm_tab.model.tick(now)
         self._update_counts()
+
+    def _clear_spots(self) -> None:
+        self.spot_model.clear()
+        self._update_counts()
+
+    def _clear_all(self) -> None:
+        self.spot_model.clear()
+        self.alarm_tab.model.clear()
+        self.unread_alarms = 0
+        self._update_alarm_tab_title()
+        self._update_counts()
+
+    def _update_clock_label(self) -> None:
+        off = self.clock.offset_minutes
+        if self.clock.clock_is_off:
+            text = tr("PC clock is off by {n} min (corrected automatically)", n=f"{-off:+d}")
+            if self.clock_lbl.text() != text:
+                log.warning("PC clock differs from the cluster by %+d min", -off)
+            self.clock_lbl.setText(text)
+            self.clock_lbl.setToolTip(tr("Spot ages are computed with the cluster time. "
+                                         "Please synchronise the computer clock and time zone."))
+            self.clock_lbl.show()
+        else:
+            self.clock_lbl.hide()
 
     def _search_changed(self, text: str) -> None:
         self.proxy.set_search(text)
@@ -679,6 +740,15 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "cty.dat", msg)
 
     # ================================================================ new versions
+    def _periodic_checks(self) -> None:
+        if self.s["check_updates"] and time.time() - self.s["last_update_check"] > UPDATE_CHECK_INTERVAL:
+            self._auto_update_check()
+        # one cty.dat attempt per day at most, even if the download keeps failing
+        if (self.s["auto_update_cty"] and self._cty_outdated()
+                and time.time() - self._last_cty_attempt > UPDATE_CHECK_INTERVAL):
+            self._last_cty_attempt = time.time()
+            self._update_cty(silent=True)
+
     def _auto_update_check(self) -> None:
         self._manual_update_check = False
         self._set("last_update_check", time.time())

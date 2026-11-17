@@ -138,3 +138,90 @@ def test_settings_dialog_builds(app, tmp_path):
     d.dupe.setValue(0)
     d.apply()
     assert s["locator"] == "KO85UQ" and s["dupe_minutes"] == 0
+
+
+def test_alarm_cleanup_and_clear_all(app, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from dxclient.core.settings import Settings
+    from dxclient.ui.main_window import MainWindow
+
+    s = Settings(tmp_path / "s.json")
+    s["callsign"] = "N0CALL"
+    s["server_enabled"] = False
+    s["check_updates"] = False
+    s["auto_update_cty"] = False
+    w = MainWindow(s)
+    line = "DX de RA3CO-#:    3510.0  3Y0J         CW 30 dB 28 WPM CQ             1237Z"
+    w.alarm_tab.model.add_spot(_spot(line, 25 * 60))  # 25 h old
+    w.alarm_tab.model.add_spot(_spot(line, 60))  # 1 h old
+    w.spot_model.add_spot(_spot(line, 5))
+    w._age_tick()
+    assert w.alarm_tab.model.rowCount() == 1  # 24 h limit by default
+    assert w.spot_model.rowCount() == 1
+
+    w.unread_alarms = 3
+    w._clear_all()
+    assert w.alarm_tab.model.rowCount() == 0 and w.spot_model.rowCount() == 0 and w.unread_alarms == 0
+    w.close()
+
+
+def _window(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from dxclient.core.settings import Settings
+    from dxclient.ui.main_window import MainWindow
+
+    s = Settings(tmp_path / "s.json")
+    s.data.update(callsign="N0CALL", server_enabled=False, check_updates=False, auto_update_cty=False,
+                  alarms=[], filter=None)
+    return MainWindow(s)
+
+
+def test_wrong_pc_clock_does_not_drop_spots(app, tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    w = _window(tmp_path, monkeypatch)
+    cluster_now = datetime.now(timezone.utc) + timedelta(minutes=20)  # PC clock 20 min slow
+    for i in range(8):
+        w._on_line(f"DX de RA3CO-#:    14025.0  JA{i}ABC       CW 23 dB 25 WPM CQ             {cluster_now:%H%M}Z")
+    assert w.spot_model.rowCount() == 8
+    assert w.clock.offset_minutes == 20 and not w.clock_lbl.isHidden()
+    assert all(s.age_minutes(w.clock.now()) < 2 for s in w.spot_model.spots)
+    w.close()
+
+
+def test_repeated_shdx_is_ignored(app, tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    w = _window(tmp_path, monkeypatch)
+    t = datetime.now(timezone.utc) - timedelta(minutes=5)
+    from dxclient.core.spot import cluster_date
+
+    line = f"   14025.0  JA1ABC      {cluster_date(t)} {t:%H%M}Z  CW 599                  <RA3CO>"
+    w._on_line(line)
+    w._on_line(line)  # sh/dx again after a reconnect
+    assert w.spot_model.rowCount() == 1 and w.spot_model.spots[0].count == 1
+    w.close()
+
+
+def test_watchdog_reconnects_silent_connection(app):
+    from PySide6.QtNetwork import QHostAddress, QTcpServer
+
+    from dxclient.core import telnet_client as tc
+
+    srv = QTcpServer()
+    assert srv.listen(QHostAddress(QHostAddress.SpecialAddress.LocalHost), 0)
+    accepted = []
+    srv.newConnection.connect(lambda: accepted.append(srv.nextPendingConnection()))
+
+    c = tc.ClusterClient()
+    c.WATCHDOG_S = 1
+    c.RECONNECT_DELAYS = [0]
+    c._watchdog.setInterval(300)
+    c.connect_to("127.0.0.1", srv.serverPort())
+    for _ in range(50):
+        QTest.qWait(100)
+        if len(accepted) >= 2:
+            break
+    assert len(accepted) >= 2  # silent server → watchdog dropped the link → reconnected
+    c.disconnect_from()
+    srv.close()

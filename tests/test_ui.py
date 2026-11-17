@@ -233,6 +233,15 @@ def test_watchdog_reconnects_silent_connection(app):
     srv.close()
 
 
+def _destroy(widget):
+    """Delete a dialog while the QApplication is still alive (PySide6 6.12 crashes otherwise)."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    widget.close()
+    widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
 def test_alarm_pattern_is_uppercase_in_call_mode(app):
     from dxclient.core.alarms import KIND_CALL, KIND_COUNTRY
     from dxclient.ui.alarm_tab import AlarmEntryDialog
@@ -255,7 +264,7 @@ def test_alarm_pattern_is_uppercase_in_call_mode(app):
     # switching back to a callsign uppercases whatever is already typed
     dlg.kind.setCurrentIndex(dlg.kind.findData(KIND_CALL))
     assert dlg.pattern.text() == "JAPAN"
-    dlg.close()
+    _destroy(dlg)
 
 
 def test_watch_list_sorts_rules_by_name(app):
@@ -285,7 +294,7 @@ def test_watch_list_sorts_rules_by_name(app):
     before = list(entries)
     dlg._header_clicked(0)  # other columns are ignored
     assert entries == before
-    dlg.close()
+    _destroy(dlg)
 
 
 def test_alarm_rejects_duplicate_rules(app, monkeypatch):
@@ -306,6 +315,7 @@ def test_alarm_rejects_duplicate_rules(app, monkeypatch):
     dlg._accept()
     assert warnings and "JA1ABC" in warnings[-1]
     assert dlg.result() != QDialog.DialogCode.Accepted
+    _destroy(dlg)
 
     # the rule being edited is not a duplicate of itself
     warnings.clear()
@@ -313,6 +323,7 @@ def test_alarm_rejects_duplicate_rules(app, monkeypatch):
     dlg._accept()
     assert warnings == []
     assert dlg.result() == QDialog.DialogCode.Accepted
+    _destroy(dlg)
 
     # quick-add from the spot menu: a duplicate preset is rejected before the editor opens
     warnings.clear()
@@ -320,4 +331,4 @@ def test_alarm_rejects_duplicate_rules(app, monkeypatch):
     wl.add(AlarmEntry("ja1abc"))
     assert warnings and "JA1ABC" in warnings[-1]
     assert [e.pattern for e in entries] == ["JA1ABC"]
-    wl.close()
+    _destroy(wl)

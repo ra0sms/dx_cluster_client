@@ -231,3 +231,93 @@ def test_watchdog_reconnects_silent_connection(app):
     assert len(accepted) >= 2  # silent server → watchdog dropped the link → reconnected
     c.disconnect_from()
     srv.close()
+
+
+def test_alarm_pattern_is_uppercase_in_call_mode(app):
+    from dxclient.core.alarms import KIND_CALL, KIND_COUNTRY
+    from dxclient.ui.alarm_tab import AlarmEntryDialog
+
+    dlg = AlarmEntryDialog(None, ["Japan"])
+    dlg.show()
+    dlg.pattern.setFocus()
+    QTest.keyClicks(dlg.pattern, "ja1abc")
+    assert dlg.pattern.text() == "JA1ABC"
+    assert dlg.pattern.validator() is not None
+    assert dlg.entry().pattern == "JA1ABC"
+
+    # country names keep their normal case (they are matched case-insensitively)
+    dlg.kind.setCurrentIndex(dlg.kind.findData(KIND_COUNTRY))
+    assert dlg.pattern.validator() is None
+    dlg.pattern.clear()
+    QTest.keyClicks(dlg.pattern, "Japan")
+    assert dlg.pattern.text() == "Japan"
+
+    # switching back to a callsign uppercases whatever is already typed
+    dlg.kind.setCurrentIndex(dlg.kind.findData(KIND_CALL))
+    assert dlg.pattern.text() == "JAPAN"
+    dlg.close()
+
+
+def test_watch_list_sorts_rules_by_name(app):
+    from dxclient.core.alarms import KIND_COUNTRY, AlarmEntry
+    from dxclient.ui.alarm_tab import WatchListDialog
+
+    entries = [
+        AlarmEntry("VP8*"),
+        AlarmEntry("3Y0J"),
+        AlarmEntry("Japan", kind=KIND_COUNTRY),
+        AlarmEntry("ja1abc"),
+    ]
+    dlg = WatchListDialog(entries, ["Japan"])
+
+    dlg.sort_btn.click()  # first click: A → Z, case-insensitive
+    assert [e.pattern for e in entries] == ["3Y0J", "ja1abc", "Japan", "VP8*"]
+    assert [dlg.table.item(r, 1).text() for r in range(4)] == [e.pattern for e in entries]
+    assert "↑" in dlg.sort_btn.text()
+
+    dlg.sort_btn.click()  # second click: Z → A
+    assert [e.pattern for e in entries] == ["VP8*", "Japan", "ja1abc", "3Y0J"]
+    assert "↓" in dlg.sort_btn.text()
+
+    dlg._header_clicked(1)  # the "Pattern" header toggles the direction too
+    assert [e.pattern for e in entries] == ["3Y0J", "ja1abc", "Japan", "VP8*"]
+
+    before = list(entries)
+    dlg._header_clicked(0)  # other columns are ignored
+    assert entries == before
+    dlg.close()
+
+
+def test_alarm_rejects_duplicate_rules(app, monkeypatch):
+    from PySide6.QtWidgets import QDialog, QMessageBox
+
+    from dxclient.core.alarms import AlarmEntry
+    from dxclient.ui.alarm_tab import AlarmEntryDialog, WatchListDialog
+
+    warnings: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda parent, title, text, *a, **k: warnings.append(text))
+
+    entries = [AlarmEntry("JA1ABC")]
+
+    # a new rule with the same callsign (any case) is rejected and the editor stays open
+    dlg = AlarmEntryDialog(None, [], existing=entries)
+    dlg.pattern.setText("ja1abc")
+    dlg._accept()
+    assert warnings and "JA1ABC" in warnings[-1]
+    assert dlg.result() != QDialog.DialogCode.Accepted
+
+    # the rule being edited is not a duplicate of itself
+    warnings.clear()
+    dlg = AlarmEntryDialog(entries[0], [], existing=entries)
+    dlg._accept()
+    assert warnings == []
+    assert dlg.result() == QDialog.DialogCode.Accepted
+
+    # quick-add from the spot menu: a duplicate preset is rejected before the editor opens
+    warnings.clear()
+    wl = WatchListDialog(entries, [])
+    wl.add(AlarmEntry("ja1abc"))
+    assert warnings and "JA1ABC" in warnings[-1]
+    assert [e.pattern for e in entries] == ["JA1ABC"]
+    wl.close()

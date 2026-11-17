@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout,
-    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLineEdit, QPushButton,
+    QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLineEdit, QMessageBox, QPushButton,
     QTableView, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -14,10 +15,41 @@ from ..i18n import tr
 from .spot_model import SpotTableModel, setup_spot_view
 
 
+class _UpperValidator(QValidator):
+    """Callsigns and masks are always uppercase: lowercase letters are not needed."""
+
+    def validate(self, text: str, pos: int):
+        return QValidator.State.Acceptable, text.upper(), pos
+
+
+def _duplicate_entry(entries: list[AlarmEntry], pattern: str, kind: str,
+                     exclude: AlarmEntry | None = None) -> AlarmEntry | None:
+    """The first rule with the same kind and pattern (case-insensitive), if any."""
+    key = pattern.strip().casefold()
+    if not key:
+        return None
+    for e in entries:
+        if e is exclude:
+            continue
+        if e.kind == kind and e.pattern.strip().casefold() == key:
+            return e
+    return None
+
+
+def _warn_duplicate(parent, pattern: str) -> None:
+    QMessageBox.warning(
+        parent, tr("Alarm entry"),
+        tr("This rule already exists in the watch list: {pattern}", pattern=pattern),
+    )
+
+
 class AlarmEntryDialog(QDialog):
-    def __init__(self, entry: AlarmEntry | None, countries: list[str], parent=None) -> None:
+    def __init__(self, entry: AlarmEntry | None, countries: list[str], parent=None,
+                 existing: list[AlarmEntry] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(tr("Alarm entry"))
+        self._original = entry  # the rule being edited: not a duplicate of itself
+        self._existing = existing or []
         entry = entry or AlarmEntry("")
         form = QFormLayout(self)
 
@@ -27,7 +59,9 @@ class AlarmEntryDialog(QDialog):
         self.kind.setCurrentIndex(self.kind.findData(entry.kind))
         form.addRow(tr("Type"), self.kind)
 
-        self.pattern = QLineEdit(entry.pattern)
+        self._upper = _UpperValidator(self)
+        initial = entry.pattern.upper() if entry.kind == KIND_CALL else entry.pattern
+        self.pattern = QLineEdit(initial)
         self.pattern.setPlaceholderText(tr("Callsign or mask (* and ? allowed), e.g. 3Y0J, VP8*, */MM"))
         self._completer = QCompleter(countries, self)
         self._completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
@@ -71,11 +105,28 @@ class AlarmEntryDialog(QDialog):
 
     def _kind_changed(self) -> None:
         is_country = self.kind.currentData() == KIND_COUNTRY
-        self.pattern.setCompleter(self._completer if is_country else None)
+        if is_country:
+            self.pattern.setValidator(None)
+            self.pattern.setCompleter(self._completer)
+        else:
+            self.pattern.setValidator(self._upper)
+            self.pattern.setCompleter(None)
+            text = self.pattern.text()
+            if text != text.upper():
+                self.pattern.setText(text.upper())
 
     def _accept(self) -> None:
-        if self.pattern.text().strip():
-            self.accept()
+        pattern = self.pattern.text().strip()
+        if not pattern:
+            return
+        duplicate = _duplicate_entry(self._existing, pattern, self.kind.currentData(),
+                                     exclude=self._original)
+        if duplicate is not None:
+            _warn_duplicate(self, duplicate.pattern)
+            self.pattern.setFocus()
+            self.pattern.selectAll()
+            return
+        self.accept()
 
     def entry(self) -> AlarmEntry:
         kind = self.kind.currentData()
@@ -110,8 +161,12 @@ class WatchListDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(20)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(True)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(False)
+        header.sectionClicked.connect(self._header_clicked)
         self.table.doubleClicked.connect(self._edit)
         self.table.itemChanged.connect(self._item_changed)
         lay.addWidget(self.table)
@@ -122,13 +177,16 @@ class WatchListDialog(QDialog):
         self.edit_btn.clicked.connect(self._edit)
         self.rm_btn = QPushButton()
         self.rm_btn.clicked.connect(self._remove)
+        self.sort_btn = QPushButton()
+        self.sort_btn.clicked.connect(self._sort_by_name)
         self.close_btn = QPushButton()
         self.close_btn.clicked.connect(self.close)
-        for w in (self.add_btn, self.edit_btn, self.rm_btn):
+        for w in (self.add_btn, self.edit_btn, self.rm_btn, self.sort_btn):
             row.addWidget(w)
         row.addStretch(1)
         row.addWidget(self.close_btn)
         lay.addLayout(row)
+        self._sort_asc: bool | None = None
         self.retranslate()
 
     def retranslate(self) -> None:
@@ -138,6 +196,7 @@ class WatchListDialog(QDialog):
         self.edit_btn.setText(tr("Edit..."))
         self.rm_btn.setText(tr("Remove"))
         self.close_btn.setText(tr("Close"))
+        self._update_sort_btn()
         self.rebuild()
 
     def rebuild(self) -> None:
@@ -159,6 +218,26 @@ class WatchListDialog(QDialog):
                 self.table.setItem(r, c, QTableWidgetItem(v))
         self.table.blockSignals(False)
 
+    def _update_sort_btn(self) -> None:
+        arrow = "" if self._sort_asc is None else (" ↑" if self._sort_asc else " ↓")
+        self.sort_btn.setText(tr("Sort by name") + arrow)
+        self.sort_btn.setToolTip(tr("Sort rules by name; click again to reverse the order"))
+
+    def _sort_by_name(self) -> None:
+        """Sort the rules by pattern (case-insensitively); repeated calls toggle the direction."""
+        asc = not self._sort_asc if self._sort_asc is not None else True
+        self._sort_asc = asc
+        self.entries.sort(key=lambda e: (e.pattern.casefold(), e.kind), reverse=not asc)
+        header = self.table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(1, Qt.SortOrder.AscendingOrder if asc else Qt.SortOrder.DescendingOrder)
+        self._update_sort_btn()
+        self._changed()
+
+    def _header_clicked(self, column: int) -> None:
+        if column == 1:  # "Pattern"
+            self._sort_by_name()
+
     def _changed(self) -> None:
         self.rebuild()
         self.entries_changed.emit()
@@ -169,7 +248,12 @@ class WatchListDialog(QDialog):
             self.entries_changed.emit()
 
     def add(self, preset: AlarmEntry | None = None) -> None:
-        dlg = AlarmEntryDialog(preset, self.countries, self)
+        if preset is not None:  # quick-add from the spot menu: don't even open a duplicate
+            duplicate = _duplicate_entry(self.entries, preset.pattern, preset.kind)
+            if duplicate is not None:
+                _warn_duplicate(self, duplicate.pattern)
+                return
+        dlg = AlarmEntryDialog(preset, self.countries, self, existing=self.entries)
         if dlg.exec():
             self.entries.append(dlg.entry())
             self._changed()
@@ -177,7 +261,7 @@ class WatchListDialog(QDialog):
     def _edit(self, *_):
         r = self.table.currentRow()
         if 0 <= r < len(self.entries):
-            dlg = AlarmEntryDialog(self.entries[r], self.countries, self)
+            dlg = AlarmEntryDialog(self.entries[r], self.countries, self, existing=self.entries)
             if dlg.exec():
                 self.entries[r] = dlg.entry()
                 self._changed()

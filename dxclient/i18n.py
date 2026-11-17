@@ -81,6 +81,9 @@ _RU: dict[str, str] = {
     # alarm tab
     "Watch list": "Список наблюдения",
     "Watch list ({n})...": "Список наблюдения ({n})...",
+    "Sort by name": "Сортировать по имени",
+    "Sort rules by name; click again to reverse the order":
+        "Сортировать правила по имени; повторное нажатие меняет порядок",
     "Close": "Закрыть",
     "Matches": "Совпадения",
     "Pattern": "Позывной / маска",
@@ -94,6 +97,8 @@ _RU: dict[str, str] = {
     "Sound": "Звук",
     "Popup": "Уведомление",
     "Alarm entry": "Запись Alarm",
+    "This rule already exists in the watch list: {pattern}":
+        "Такое правило уже есть в списке наблюдения: {pattern}",
     "Callsign or mask (* and ? allowed), e.g. 3Y0J, VP8*, */MM":
         "Позывной или маска (* и ?), например 3Y0J, VP8*, */MM",
     "Any band": "Любой диапазон",

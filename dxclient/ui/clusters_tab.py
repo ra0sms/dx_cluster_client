@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 
 from ..core.cluster_list import CLUSTERS_URL, ClusterNode, load_cache, parse_clusters_json
 from ..i18n import tr
+from .qt_compat import change_filter
 
 COLS = ["Name", "Address", "Region", "Type", "Status", "★", "Spots/min", "Users", "Uptime 7d"]
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -93,9 +94,10 @@ class ClusterProxy(QSortFilterProxyModel):
         self.setSortRole(SORT_ROLE)
 
     def update(self, only_up: bool, region: str, text: str) -> None:
-        self.beginFilterChange()
-        self.only_up, self.region, self.text = only_up, region, text.lower().strip()
-        self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
+        def apply() -> None:
+            self.only_up, self.region, self.text = only_up, region, text.lower().strip()
+
+        change_filter(self, apply)
 
     def filterAcceptsRow(self, row, parent) -> bool:
         n: ClusterNode = self.sourceModel().nodes[row]

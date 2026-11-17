@@ -11,6 +11,7 @@ from ..core.bands import mode_label
 from ..core.filters import SpotFilter
 from ..core.spot import Spot
 from ..i18n import tr
+from .qt_compat import change_filter
 
 COLUMNS = ["Time", "Freq", "DX", "Country", "Cont", "Az", "km", "Band", "Mode", "Comment", "Spotter", "Sp. cont"]
 (COL_TIME, COL_FREQ, COL_DX, COL_COUNTRY, COL_CONT, COL_AZ, COL_DIST, COL_BAND, COL_MODE, COL_COMMENT,
@@ -25,17 +26,21 @@ ALARM_BG = QColor(255, 196, 0, 90)
 OLD_FG = QColor(128, 128, 128)
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
+MIN_ROWS = 100
 
 
 class SpotTableModel(QAbstractTableModel):
     def __init__(self, max_rows: int = 2000, parent=None) -> None:
         super().__init__(parent)
-        self.spots: list[Spot] = []  # newest first
-        self.max_rows = max_rows
+        self.spots: list[Spot] = []  # newest first; read-only for other modules
+        self.max_rows = max(MIN_ROWS, int(max_rows))
         self.fade_minutes = 0  # spots older than this are shown greyed out (0 = never)
         self._now = datetime.now(timezone.utc)
         self._bold = QFont()
         self._bold.setBold(True)
+        # Index callsign -> its spots, newest first. Keeps duplicate and exact-match lookups
+        # proportional to the number of spots of one station, not to the whole table.
+        self._by_call: dict[str, list[Spot]] = {}
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self.spots)
@@ -121,25 +126,22 @@ class SpotTableModel(QAbstractTableModel):
         if old is not None:
             spot.count = old.count + 1
             row = next(i for i, x in enumerate(self.spots) if x is old)
-            self.beginRemoveRows(QModelIndex(), row, row)
-            del self.spots[row]
-            self.endRemoveRows()
+            self._remove_rows([row])
         self._insert(spot)
         return old
 
     def has_exact(self, spot: Spot) -> bool:
         """The very same spot (call, frequency, time, spotter) is already in the table —
         e.g. sh/dx output repeated after a reconnect."""
-        for s in self.spots:
-            if (s.dx == spot.dx and s.when == spot.when and s.spotter == spot.spotter
-                    and abs(s.freq - spot.freq) < 0.05):
-                return True
-        return False
+        return any(
+            s.when == spot.when and s.spotter == spot.spotter and abs(s.freq - spot.freq) < 0.05
+            for s in self._by_call.get(spot.dx, ())
+        )
 
     def find_dupe(self, spot: Spot, minutes: int) -> Spot | None:
         t = spot.when or spot.received
-        for s in self.spots:
-            if s.dx == spot.dx and s.band == spot.band and s.mode == spot.mode:
+        for s in self._by_call.get(spot.dx, ()):
+            if s.band == spot.band and s.mode == spot.mode:
                 if abs((t - (s.when or s.received)).total_seconds()) <= minutes * 60:
                     return s
         return None
@@ -147,10 +149,7 @@ class SpotTableModel(QAbstractTableModel):
     def remove_older_than(self, minutes: int, now: datetime) -> int:
         """Drop spots older than `minutes`; returns how many were removed."""
         rows = [i for i, s in enumerate(self.spots) if s.age_minutes(now) > minutes]
-        for i in reversed(rows):
-            self.beginRemoveRows(QModelIndex(), i, i)
-            del self.spots[i]
-            self.endRemoveRows()
+        self._remove_rows(rows)
         return len(rows)
 
     def tick(self, now: datetime | None = None) -> None:
@@ -163,23 +162,43 @@ class SpotTableModel(QAbstractTableModel):
     def _insert(self, spot: Spot) -> None:
         self.beginInsertRows(QModelIndex(), 0, 0)
         self.spots.insert(0, spot)
+        self._by_call.setdefault(spot.dx, []).insert(0, spot)
         self.endInsertRows()
         if len(self.spots) > self.max_rows:
-            first = self.max_rows
-            self.beginRemoveRows(QModelIndex(), first, len(self.spots) - 1)
-            del self.spots[first:]
+            self._remove_rows(list(range(self.max_rows, len(self.spots))))
+
+    def _remove_rows(self, rows: list[int]) -> None:
+        """Remove the given row numbers, emitting one signal per contiguous run of rows."""
+        runs: list[tuple[int, int]] = []
+        for r in sorted(set(rows)):
+            if runs and r == runs[-1][1] + 1:
+                runs[-1] = (runs[-1][0], r)
+            else:
+                runs.append((r, r))
+        for lo, hi in reversed(runs):  # from the bottom, so earlier row numbers stay valid
+            self.beginRemoveRows(QModelIndex(), lo, hi)
+            for s in self.spots[lo:hi + 1]:
+                self._unindex(s)
+            del self.spots[lo:hi + 1]
             self.endRemoveRows()
 
+    def _unindex(self, spot: Spot) -> None:
+        lst = self._by_call.get(spot.dx)
+        if lst is None:
+            return
+        lst[:] = [x for x in lst if x is not spot]
+        if not lst:
+            del self._by_call[spot.dx]
+
     def set_max_rows(self, n: int) -> None:
-        self.max_rows = max(100, n)
+        self.max_rows = max(MIN_ROWS, int(n))
         if len(self.spots) > self.max_rows:
-            self.beginRemoveRows(QModelIndex(), self.max_rows, len(self.spots) - 1)
-            del self.spots[self.max_rows:]
-            self.endRemoveRows()
+            self._remove_rows(list(range(self.max_rows, len(self.spots))))
 
     def clear(self) -> None:
         self.beginResetModel()
         self.spots.clear()
+        self._by_call.clear()
         self.endResetModel()
 
     def spot_at(self, row: int) -> Spot | None:
@@ -203,18 +222,16 @@ class SpotFilterProxy(QSortFilterProxyModel):
         self.setDynamicSortFilter(True)
 
     def set_filter(self, f: SpotFilter | None) -> None:
-        if hasattr(self, "beginFilterChange"):  # Qt >= 6.9
-            self.beginFilterChange()
+        def apply() -> None:
             self.spot_filter = f
-            self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
-        else:
-            self.spot_filter = f
-            self.invalidateFilter()
+
+        change_filter(self, apply)
 
     def set_search(self, text: str) -> None:
-        self.beginFilterChange()
-        self.search = text.strip().upper()
-        self.endFilterChange(QSortFilterProxyModel.Direction.Rows)
+        def apply() -> None:
+            self.search = text.strip().upper()
+
+        change_filter(self, apply)
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
         spot = self.sourceModel().spot_at(source_row)

@@ -52,11 +52,19 @@ class SpotFilter:
     @classmethod
     def from_dict(cls, d: dict | None) -> "SpotFilter":
         f = cls()
-        if not d:
+        if not isinstance(d, dict) or not d:  # damaged or missing preset → no filtering
             return f
         for k in ("bands", "modes", "dx_continents", "spotter_continents", "countries"):
-            if k in d:
-                setattr(f, k, set(d[k]))
-        f.country_mode = d.get("country_mode", COUNTRY_ALL)
+            if isinstance(d.get(k), list):  # a damaged value keeps the default: "everything"
+                setattr(f, k, _str_set(d[k]))
+        mode = d.get("country_mode", COUNTRY_ALL)
+        f.country_mode = mode if mode in (COUNTRY_ALL, COUNTRY_ONLY, COUNTRY_EXCLUDE) else COUNTRY_ALL
         f.show_unknown_band = bool(d.get("show_unknown_band", False))
         return f
+
+
+def _str_set(value) -> set[str]:
+    """A JSON list of strings → set; anything else → empty set (ignores bad items)."""
+    if not isinstance(value, list):
+        return set()
+    return {v for v in value if isinstance(v, str)}

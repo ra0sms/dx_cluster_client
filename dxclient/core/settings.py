@@ -59,6 +59,56 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+def atomic_write(path: Path, text: str, *, encoding: str = "utf-8", mode: int = 0o644) -> None:
+    """Write via a temporary file and rename it over `path`, so a crash never leaves a half-written
+    file. `mode` applies on POSIX systems from the moment the file is created."""
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, "w", encoding=encoding) as f:
+        f.write(text)
+    tmp.replace(path)
+
+
+def _is_type(value: Any, default: Any) -> bool:
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, int):
+        return isinstance(value, int) and not isinstance(value, bool)
+    if isinstance(default, float):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(default, str):
+        return isinstance(value, str)
+    if isinstance(default, list):
+        return isinstance(value, list)
+    if isinstance(default, dict):
+        return isinstance(value, dict)
+    return True  # None default: any JSON value
+
+
+# list settings whose items must be of one kind; other items are dropped
+_LIST_ITEM_TYPE = {"alarms": dict, "custom_clusters": dict, "cluster_history": str, "login_commands": str}
+
+
+def _sanitize(stored: dict[str, Any]) -> dict[str, Any]:
+    """Keep only values of the expected type. A hand-edited or damaged settings file must not
+    stop the application from starting: a wrong value falls back to its default."""
+    out: dict[str, Any] = {}
+    for key, value in stored.items():
+        default = DEFAULTS.get(key)
+        if key not in DEFAULTS:
+            out[key] = value  # unknown keys are kept, so a newer version's settings survive
+            continue
+        if not _is_type(value, default):
+            log = logging.getLogger("dxclient")
+            log.warning("setting %r has an unexpected value %r, using the default", key, value)
+            continue
+        if isinstance(value, list) and key in _LIST_ITEM_TYPE:
+            kind = _LIST_ITEM_TYPE[key]
+            value = [v for v in value if isinstance(v, kind)]
+        out[key] = value
+    return out
+
+
 class Settings:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (config_dir() / "settings.json")
@@ -88,12 +138,11 @@ class Settings:
             self.load_error = f"{e} → {backup}"
             logging.getLogger("dxclient").error("damaged settings file moved to %s: %s", backup, e)
             return
-        self.data.update(stored)
+        self.data.update(_sanitize(stored))
 
     def save(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        # The file holds the cluster password, so it is readable by the owner only.
+        atomic_write(self.path, json.dumps(self.data, ensure_ascii=False, indent=2), mode=0o600)
 
     def __getitem__(self, key: str) -> Any:
         return self.data.get(key, DEFAULTS.get(key))

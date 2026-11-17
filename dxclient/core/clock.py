@@ -8,6 +8,7 @@ make every spot look old (and get dropped) or come from the future.
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from statistics import median
 
@@ -46,3 +47,24 @@ class ClockSync:
     def now(self, local: datetime | None = None) -> datetime:
         local = local or datetime.now(timezone.utc)
         return local + timedelta(minutes=self.offset_minutes)
+
+
+@dataclass(frozen=True)
+class SpotVerdict:
+    drop: bool  # not shown at all
+    fresh: bool  # new enough to alarm and to forward to loggers
+
+
+def judge_spot(*, live: bool, calibrated: bool, age_min: float, max_age_min: int, fresh_min: int) -> SpotVerdict:
+    """Decide what to do with an arriving spot.
+
+    Until the clock is calibrated, the PC clock may be wrong by hours, so its idea of a spot's
+    age means nothing. A live 'DX de' line is current by definition: keep it and treat it as fresh.
+    A history line (sh/dx right after login) may be arbitrarily old: keep it, but never treat it
+    as fresh, otherwise a 3-hour-old spot would raise an Alarm when the PC clock is 3 hours slow.
+    Once calibrated, age is computed with the cluster time and the normal rules apply."""
+    if not calibrated:
+        return SpotVerdict(drop=False, fresh=live)
+    drop = bool(max_age_min) and age_min > max_age_min
+    fresh = not fresh_min or age_min <= fresh_min
+    return SpotVerdict(drop=drop, fresh=fresh)

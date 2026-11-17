@@ -152,6 +152,12 @@ def test_alarm_cleanup_and_clear_all(app, tmp_path, monkeypatch):
     s["auto_update_cty"] = False
     w = MainWindow(s)
     line = "DX de RA3CO-#:    3510.0  3Y0J         CW 30 dB 28 WPM CQ             1237Z"
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    for _ in range(5):  # age-based cleanup needs a calibrated clock; the PC clock is right here
+        w.clock.feed(f"{now:%H%M}", now)
+    assert w.clock.calibrated
     w.alarm_tab.model.add_spot(_spot(line, 25 * 60))  # 25 h old
     w.alarm_tab.model.add_spot(_spot(line, 60))  # 1 h old
     w.spot_model.add_spot(_spot(line, 5))

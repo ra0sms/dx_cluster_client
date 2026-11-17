@@ -47,12 +47,18 @@ class AlarmEntry:
 
     @classmethod
     def from_dict(cls, d: dict) -> "AlarmEntry":
+        def strs(v) -> set[str]:
+            return {x for x in v if isinstance(x, str)} if isinstance(v, list) else set()
+
+        pattern = d.get("pattern")
+        kind = d.get("kind")
+        note = d.get("note")
         return cls(
-            pattern=d.get("pattern", ""),
-            kind=d.get("kind", KIND_CALL),
-            bands=set(d.get("bands", [])),
-            modes=set(d.get("modes", [])),
-            note=d.get("note", ""),
+            pattern=pattern if isinstance(pattern, str) else "",
+            kind=kind if kind in (KIND_CALL, KIND_COUNTRY) else KIND_CALL,
+            bands=strs(d.get("bands")),
+            modes=strs(d.get("modes")),
+            note=note if isinstance(note, str) else "",
             enabled=bool(d.get("enabled", True)),
         )
 

@@ -18,12 +18,12 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..core.alarms import KIND_COUNTRY, AlarmEntry, AlarmList
 from ..core.bands import mode_label
-from ..core.clock import ClockSync
+from ..core.clock import ClockSync, judge_spot
 from ..core.cluster_list import parse_address
 from ..core.dxcc import DxccDB
 from ..core.filters import SpotFilter
 from ..core.geo import bearing_distance, locator_to_latlon
-from ..core.settings import Settings, config_dir
+from ..core.settings import Settings, atomic_write, config_dir
 from ..core.solar import SolarData, SolarFetcher
 from ..core.spot import Spot, nearest_datetime, parse_spot
 from ..core.telnet_client import STATE_CONNECTED, STATE_DISCONNECTED, ClusterClient
@@ -440,13 +440,11 @@ class MainWindow(QMainWindow):
         if self.spot_model.has_exact(spot):
             return  # the same spot again (sh/dx repeated after a reconnect)
         age = spot.age_minutes(now)  # never negative: "future" spots count as current
-        # Until the clock is calibrated it may be wrong by hours: never drop a live spot then,
-        # but still keep obviously old ones quiet (no alarm / forwarding) when the clock is right.
-        drop_age = 0.0 if live and not self.clock.calibrated else age
-        max_age = self.s["max_age_minutes"]
-        if max_age and drop_age > max_age:
+        verdict = judge_spot(live=live, calibrated=self.clock.calibrated, age_min=age,
+                             max_age_min=self.s["max_age_minutes"], fresh_min=self.s["fresh_minutes"])
+        if verdict.drop:
             return  # e.g. hours-old spots from sh/dx: not worth showing
-        fresh = not self.s["fresh_minutes"] or age <= self.s["fresh_minutes"]
+        fresh = verdict.fresh
         self._apply_geo(spot)
         entry = self.alarms.find(spot)
         spot.alarm = entry is not None
@@ -485,9 +483,10 @@ class MainWindow(QMainWindow):
 
     def _age_tick(self) -> None:
         now = self.clock.now()
-        if self.s["max_age_minutes"]:
+        # Age-based removal needs a calibrated clock; before that the PC clock may be hours off.
+        if self.clock.calibrated and self.s["max_age_minutes"]:
             self.spot_model.remove_older_than(self.s["max_age_minutes"], now)
-        if self.s["alarm_max_age_hours"]:
+        if self.clock.calibrated and self.s["alarm_max_age_hours"]:
             self.alarm_tab.model.remove_older_than(self.s["alarm_max_age_hours"] * 60, now)
         self.spot_model.tick(now)
         self.alarm_tab.model.tick(now)
@@ -729,7 +728,11 @@ class MainWindow(QMainWindow):
         if len(db.entities) < 300:
             fail("invalid file")
             return
-        (config_dir() / "cty.dat").write_text(text, encoding="latin-1")
+        try:
+            atomic_write(config_dir() / "cty.dat", text, encoding="latin-1")
+        except OSError as e:
+            fail(str(e))
+            return
         self.db = db
         ver = db.version.isoformat() if db.version else "?"
         log.info("cty.dat updated to %s", ver)

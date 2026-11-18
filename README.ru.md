@@ -105,6 +105,7 @@ pyinstaller dxclusterclient.spec
 ## Структура проекта
 
 ```
+CHANGELOG.md, CHANGELOG.ru.md   история изменений (en/ru)
 dxclient/
   core/      telnet-клиент, парсер спотов, DXCC (cty.dat), диапазоны/виды, фильтры, alarm, список кластеров
   ui/        главное окно, вкладки и Qt-совместимость (PySide6)
@@ -114,6 +115,10 @@ packaging/   скрипты сборки AppImage / Windows, иконки, .desk
 pics/        скриншоты для README
 tests/       тесты pytest (ядро, UI, устойчивость, история часов)
 ```
+
+## История изменений
+
+Полный список изменений по версиям — в [CHANGELOG.ru.md](CHANGELOG.ru.md).
 
 ## Лицензия
 

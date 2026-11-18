@@ -106,6 +106,7 @@ Or on Linux under Wine in a container: `bash packaging/build_windows.sh`.
 ## Project layout
 
 ```
+CHANGELOG.md, CHANGELOG.ru.md   release notes (en/ru)
 dxclient/
   core/      telnet client, spot parser, DXCC (cty.dat), bands/modes, filters, alarms, cluster list
   ui/        main window, tabs and Qt compatibility helpers (PySide6)
@@ -115,6 +116,10 @@ packaging/   AppImage / Windows build scripts, icons, .desktop file
 pics/        screenshots used in this README
 tests/       pytest tests (core, UI, hardening, clock history)
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list of changes in each version.
 
 ## License
 

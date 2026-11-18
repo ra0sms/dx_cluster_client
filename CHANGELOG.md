@@ -17,6 +17,12 @@ All notable changes to DX Cluster Client are documented in this file. The format
 
 - READMEs refreshed for 0.3.2: Alarm behavior, duplicate counter, cluster list refresh, project layout.
 
+### Fixed
+
+- Alarm: removing or disabling a watch-list rule now also drops the spots it already collected from
+  the Alarm tab and resets the unread badge; previously those matches stayed until they aged out
+  (24 h) or were cleared manually, so it looked like spots kept arriving.
+
 ## [0.3.2] — 2026-11-17
 
 ### Added

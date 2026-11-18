@@ -653,6 +653,12 @@ class MainWindow(QMainWindow):
         for s in self.spot_model.spots:
             s.alarm = self.alarms.find(s) is not None
         self.spot_model.refresh_alarm_flags()
+        # A removed or disabled rule must also drop its old matches from the Alarm tab,
+        # otherwise the tab keeps showing spots the user no longer wants to watch.
+        if self.alarm_tab.model.remove_where(lambda s: self.alarms.find(s) is not None):
+            if not self.alarm_tab.model.spots:
+                self.unread_alarms = 0
+            self._update_alarm_tab_title()
 
     def _alarm_options(self, sound: bool, popup: bool) -> None:
         self.s["alarm_sound"] = sound

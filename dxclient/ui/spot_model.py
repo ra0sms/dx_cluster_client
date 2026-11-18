@@ -152,6 +152,12 @@ class SpotTableModel(QAbstractTableModel):
         self._remove_rows(rows)
         return len(rows)
 
+    def remove_where(self, keep) -> int:
+        """Drop the spots for which `keep(spot)` is False; returns how many were removed."""
+        rows = [i for i, s in enumerate(self.spots) if not keep(s)]
+        self._remove_rows(rows)
+        return len(rows)
+
     def tick(self, now: datetime | None = None) -> None:
         """Refresh age-dependent colours."""
         self._now = now or datetime.now(timezone.utc)

@@ -332,3 +332,27 @@ def test_alarm_rejects_duplicate_rules(app, monkeypatch):
     assert warnings and "JA1ABC" in warnings[-1]
     assert [e.pattern for e in entries] == ["JA1ABC"]
     _destroy(wl)
+
+
+def test_removing_an_alarm_rule_drops_its_matches(app, tmp_path, monkeypatch):
+    """Deleting a rule must clear its already collected spots from the Alarm tab."""
+    from dxclient.core.alarms import AlarmEntry
+
+    w = _window(tmp_path, monkeypatch)
+    line = "DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z"
+    w.alarms.entries.append(AlarmEntry("JA1ABC"))
+    w._alarms_changed(w.alarms.entries)  # what the watch list signals after an edit
+    w._on_line(line)
+    assert w.alarm_tab.model.rowCount() == 1 and w.spot_model.spots[0].alarm
+    w.unread_alarms = 2
+
+    w.alarms.entries.clear()  # the watch list removes the rule in place
+    w._alarms_changed(w.alarms.entries)
+    assert w.alarm_tab.model.rowCount() == 0
+    assert not w.spot_model.spots[0].alarm
+    assert w.unread_alarms == 0
+
+    w._on_line(line.replace("1234Z", "1235Z"))  # a new spot no longer matches
+    assert w.alarm_tab.model.rowCount() == 0
+    assert w.unread_alarms == 0
+    w.close()

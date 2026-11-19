@@ -138,6 +138,23 @@ def _parse_detailed(items: Any) -> list[ClusterNode]:
     return nodes
 
 
+def parse_custom_nodes(items: Any) -> list[ClusterNode]:
+    """User-defined nodes from settings. Damaged items are skipped, never raised."""
+    out: list[ClusterNode] = []
+    seen: set[str] = set()
+    for n in _dicts(items):
+        host = _str(n.get("host"))
+        port = _int(n.get("port"))
+        if not host or port is None or not 1 <= port <= 65535:
+            continue
+        key = f"{host.lower()}:{port}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ClusterNode(_str(n.get("name")) or host, host, port, custom=True))
+    return out
+
+
 def load_cache(path: Path) -> list[ClusterNode]:
     try:
         return parse_clusters_json(path.read_bytes())

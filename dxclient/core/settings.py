@@ -12,6 +12,8 @@ from typing import Any
 from .. import APP_NAME
 from .cluster_list import DEFAULT_CLUSTER
 
+log = logging.getLogger("dxclient")
+
 
 def config_dir() -> Path:
     if sys.platform == "win32":
@@ -56,17 +58,49 @@ DEFAULTS: dict[str, Any] = {
     "auto_update_cty": True,
     "geometry": None,
     "window_state": None,
+    "spot_header_state": None,  # base64-encoded QHeaderView state
+    "spot_sort_column": 0,  # COL_TIME
+    "spot_sort_order": "desc",
 }
 
 
-def atomic_write(path: Path, text: str, *, encoding: str = "utf-8", mode: int = 0o644) -> None:
-    """Write via a temporary file and rename it over `path`, so a crash never leaves a half-written
-    file. `mode` applies on POSIX systems from the moment the file is created."""
+def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o644) -> None:
+    """Atomically write binary data: a temporary file, fsync, rename and directory fsync."""
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "w", encoding=encoding) as f:
-        f.write(text)
-    tmp.replace(path)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            try:
+                os.fsync(f.fileno())  # flush the data before the rename when supported
+            except OSError:
+                pass  # some filesystems do not support fsync; the rename is still atomic
+        tmp.replace(path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    # Make the rename durable too. Windows does not allow opening a directory this way,
+    # and some filesystems do not support fsync on a directory.
+    try:
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def atomic_write(path: Path, text: str, *, encoding: str = "utf-8", mode: int = 0o644) -> None:
+    """Write text via `atomic_write_bytes`, so a crash never leaves a half-written file.
+    `mode` applies on POSIX systems from the moment the file is created."""
+    atomic_write_bytes(path, text.encode(encoding), mode=mode)
 
 
 def _is_type(value: Any, default: Any) -> bool:
@@ -87,6 +121,8 @@ def _is_type(value: Any, default: Any) -> bool:
 
 # list settings whose items must be of one kind; other items are dropped
 _LIST_ITEM_TYPE = {"alarms": dict, "custom_clusters": dict, "cluster_history": str, "login_commands": str}
+# settings that may be None or a string (base64 geometry / dock / header state)
+_STR_OR_NONE = {"geometry", "window_state", "spot_header_state"}
 
 
 def _sanitize(stored: dict[str, Any]) -> dict[str, Any]:
@@ -98,8 +134,13 @@ def _sanitize(stored: dict[str, Any]) -> dict[str, Any]:
         if key not in DEFAULTS:
             out[key] = value  # unknown keys are kept, so a newer version's settings survive
             continue
+        if key in _STR_OR_NONE and value is not None and not isinstance(value, str):
+            log.warning("setting %r has an unexpected value %r, using the default", key, value)
+            continue
+        if key == "spot_sort_order" and value not in ("asc", "desc"):
+            log.warning("setting %r has an unexpected value %r, using the default", key, value)
+            continue
         if not _is_type(value, default):
-            log = logging.getLogger("dxclient")
             log.warning("setting %r has an unexpected value %r, using the default", key, value)
             continue
         if isinstance(value, list) and key in _LIST_ITEM_TYPE:

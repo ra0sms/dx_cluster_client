@@ -338,6 +338,13 @@ class AlarmTab(QWidget):
             self._dialog.rebuild()
         self._update_watch_btn()
 
+    def set_countries(self, countries: list[str]) -> None:
+        """Refresh the country list after a cty.dat update."""
+        self.countries = countries
+        if self._dialog is not None:
+            self._dialog.countries = countries
+            self._dialog.rebuild()
+
     def set_options(self, sound: bool, popup: bool) -> None:
         self.sound_cb.setChecked(sound)
         self.popup_cb.setChecked(popup)

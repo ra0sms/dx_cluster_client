@@ -12,7 +12,10 @@ from PySide6.QtWidgets import (
     QHeaderView, QLabel, QLineEdit, QPushButton, QSpinBox, QTableView, QVBoxLayout, QWidget,
 )
 
-from ..core.cluster_list import CLUSTERS_URL, ClusterNode, load_cache, parse_clusters_json
+from ..core.cluster_list import (
+    CLUSTERS_URL, ClusterNode, load_cache, parse_clusters_json, parse_custom_nodes,
+)
+from ..core.settings import atomic_write_bytes
 from ..i18n import tr
 from .qt_compat import change_filter
 
@@ -142,11 +145,7 @@ class ClustersTab(QWidget):
     def __init__(self, cache_path: Path, custom: list[dict], parent=None) -> None:
         super().__init__(parent)
         self.cache_path = cache_path
-        self.custom = [
-            ClusterNode(d.get("name", d["host"]), d["host"], int(d["port"]), custom=True)
-            for d in custom
-            if d.get("host")
-        ]
+        self.custom = parse_custom_nodes(custom)
         self.remote: list[ClusterNode] = []
         self._nam = QNetworkAccessManager(self)
         self._reply: QNetworkReply | None = None
@@ -277,7 +276,7 @@ class ClustersTab(QWidget):
             self._update_status("empty list")
             return
         try:
-            self.cache_path.write_bytes(data)
+            atomic_write_bytes(self.cache_path, data)
         except OSError:
             pass
         self.remote = nodes

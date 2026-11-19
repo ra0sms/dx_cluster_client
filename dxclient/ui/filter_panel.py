@@ -284,6 +284,10 @@ class FilterPanel(QWidget):
         self.preset_combo.addItems(sorted(self.presets))
         self.preset_combo.setCurrentIndex(-1)
 
+    def set_countries(self, countries: list[str]) -> None:
+        """Refresh the country list after a cty.dat update."""
+        self.countries = countries
+
     def exclude_country(self, name: str) -> None:
         f = self.current_filter()
         if f.country_mode == COUNTRY_ONLY:

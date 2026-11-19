@@ -7,10 +7,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QGuiApplication, QIcon
+from PySide6.QtGui import (
+    QAction, QActionGroup, QDesktopServices, QGuiApplication, QIcon, QKeySequence, QShortcut,
+)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QComboBox, QDockWidget, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+    QApplication, QComboBox, QDockWidget, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
     QMenu, QMessageBox, QPushButton, QSizePolicy, QSystemTrayIcon, QTableView, QTabWidget, QToolBar,
     QVBoxLayout, QWidget,
 )
@@ -71,6 +73,10 @@ class MainWindow(QMainWindow):
     def __init__(self, settings: Settings) -> None:
         super().__init__()
         self.s = settings
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self.s.save)
         self.db = load_dxcc()
         self.alarms = AlarmList(
             [AlarmEntry.from_dict(d) for d in settings["alarms"]], settings["alarm_repeat_minutes"]
@@ -147,8 +153,10 @@ class MainWindow(QMainWindow):
         self.spot_view = QTableView()
         self.spot_view.setModel(self.proxy)
         self.spot_view.setSortingEnabled(True)
-        self.spot_view.sortByColumn(COL_TIME, Qt.SortOrder.DescendingOrder)
         setup_spot_view(self.spot_view)
+        self.spot_view.sortByColumn(COL_TIME, Qt.SortOrder.DescendingOrder)
+        self._restore_spot_view()
+        self._add_copy_shortcut(self.spot_view)
         self.spot_view.doubleClicked.connect(lambda idx: self._lookup(self.proxy.spot_at(idx.row())))
         self.spot_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.spot_view.customContextMenuRequested.connect(self._spot_menu)
@@ -186,6 +194,7 @@ class MainWindow(QMainWindow):
         self.alarm_tab.spot_activated.connect(self._lookup)
         self.alarm_tab.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.alarm_tab.view.customContextMenuRequested.connect(self._alarm_spot_menu)
+        self._add_copy_shortcut(self.alarm_tab.view)
 
         self.console = ConsoleTab()
         self.console.command.connect(self.client.send)
@@ -265,10 +274,12 @@ class MainWindow(QMainWindow):
                 tr("The settings file was damaged and has been reset. A copy was kept:\n{msg}",
                    msg=settings.load_error)))
 
-        if settings["geometry"]:
-            self.restoreGeometry(QByteArray.fromBase64(settings["geometry"].encode()))
-        if settings["window_state"]:
-            self.restoreState(QByteArray.fromBase64(settings["window_state"].encode()), self.STATE_VERSION)
+        geometry = settings["geometry"]
+        if isinstance(geometry, str) and geometry:
+            self.restoreGeometry(QByteArray.fromBase64(geometry.encode()))
+        state = settings["window_state"]
+        if isinstance(state, str) and state:
+            self.restoreState(QByteArray.fromBase64(state.encode()), self.STATE_VERSION)
 
         age = self.clusters_tab.cache_age_seconds()
         if age is None or age > CLUSTER_LIST_MAX_AGE:
@@ -345,7 +356,49 @@ class MainWindow(QMainWindow):
     # ================================================================ settings
     def _set(self, key, value) -> None:
         self.s[key] = value
-        self.s.save()
+        self._save_timer.start()  # debounce: filters change in bursts
+
+    def _restore_spot_view(self) -> None:
+        state = self.s["spot_header_state"]
+        if isinstance(state, str) and state:
+            self.spot_view.horizontalHeader().restoreState(QByteArray.fromBase64(state.encode()))
+        col = self.s["spot_sort_column"]
+        if isinstance(col, int) and 0 <= col < self.spot_model.columnCount():
+            order = (Qt.SortOrder.AscendingOrder if self.s["spot_sort_order"] == "asc"
+                     else Qt.SortOrder.DescendingOrder)
+            self.spot_view.sortByColumn(col, order)
+
+    def _save_spot_view(self) -> None:
+        header = self.spot_view.horizontalHeader()
+        self.s["spot_header_state"] = bytes(header.saveState().toBase64()).decode()
+        self.s["spot_sort_column"] = header.sortIndicatorSection()
+        self.s["spot_sort_order"] = (
+            "asc" if header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder else "desc"
+        )
+
+    def _add_copy_shortcut(self, view: QTableView) -> None:
+        shortcut = QShortcut(QKeySequence(QKeySequence.StandardKey.Copy), view)
+        shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        shortcut.activated.connect(lambda v=view: self._copy_view(v))
+
+    def _copy_view(self, view: QTableView) -> None:
+        model = view.model()
+        rows = sorted({i.row() for i in view.selectionModel().selectedRows()})
+        if not rows:
+            current = view.currentIndex()
+            if current.isValid():
+                rows = [current.row()]
+        if not rows:
+            return
+        lines = []
+        for row in rows:
+            values = [
+                model.data(model.index(row, col), Qt.ItemDataRole.DisplayRole) or ""
+                for col in range(model.columnCount())
+            ]
+            lines.append("\t".join(str(v) for v in values))
+        QGuiApplication.clipboard().setText("\n".join(lines))
+        self.statusBar().showMessage(tr("Copied {n} rows", n=len(lines)), 3000)
 
     def _set_language(self, code: str) -> None:
         self._set("language", code)
@@ -671,11 +724,12 @@ class MainWindow(QMainWindow):
             base = max(spot.dx.split("/"), key=len)
             QDesktopServices.openUrl(QUrl(self.s["lookup_url"].replace("{call}", base)))
 
-    def _spot_context(self, spot: Spot | None, global_pos) -> None:
+    def _spot_context(self, spot: Spot | None, global_pos, view: QTableView | None = None) -> None:
         if not spot:
             return
         m = QMenu(self)
         m.addAction(tr("Open in QRZ.com"), lambda: self._lookup(spot))
+        m.addAction(tr("Copy"), lambda: self._copy_view(view or self.spot_view))
         m.addAction(tr("Copy callsign"), lambda: QGuiApplication.clipboard().setText(spot.dx))
         a = m.addAction(tr("Send spot..."), lambda: self._send_spot_dialog(spot))
         a.setEnabled(self.client.state == STATE_CONNECTED)
@@ -691,13 +745,15 @@ class MainWindow(QMainWindow):
     def _spot_menu(self, pos) -> None:
         idx = self.spot_view.indexAt(pos)
         if idx.isValid():
-            self._spot_context(self.proxy.spot_at(idx.row()), self.spot_view.viewport().mapToGlobal(pos))
+            self._spot_context(self.proxy.spot_at(idx.row()),
+                               self.spot_view.viewport().mapToGlobal(pos), self.spot_view)
 
     def _alarm_spot_menu(self, pos) -> None:
         v = self.alarm_tab.view
         idx = v.indexAt(pos)
         if idx.isValid():
-            self._spot_context(self.alarm_tab.model.spot_at(idx.row()), v.viewport().mapToGlobal(pos))
+            self._spot_context(self.alarm_tab.model.spot_at(idx.row()),
+                               v.viewport().mapToGlobal(pos), v)
 
     def _quick_alarm(self, entry: AlarmEntry) -> None:
         self.alarm_tab.add_entry(entry)
@@ -706,6 +762,23 @@ class MainWindow(QMainWindow):
     def _cty_outdated(self) -> bool:
         v = self.db.version
         return v is None or (datetime.now(timezone.utc).date() - v).days > CTY_MAX_AGE_DAYS
+
+    def _apply_dxcc(self, db: DxccDB) -> None:
+        """Switch to a new cty.dat and refresh everything that depends on it."""
+        self.db = db
+        countries = db.country_names
+        self.filter_panel.set_countries(countries)
+        self.alarm_tab.set_countries(countries)
+        # Existing spots may resolve differently (or for the first time) with the new data.
+        for model in (self.spot_model, self.alarm_tab.model):
+            for s in model.spots:
+                s.dx_entity = db.lookup(s.dx)
+                s.spotter_entity = db.lookup(s.spotter)
+                self._apply_geo(s)
+            model.refresh_alarm_flags()
+        # Re-run the current filter through the Qt-version-aware helper.
+        self.proxy.set_filter(self.proxy.spot_filter)
+        self._update_counts()
 
     def _update_cty(self, silent: bool = False) -> None:
         req = QNetworkRequest(QUrl(CTY_URL))
@@ -739,7 +812,7 @@ class MainWindow(QMainWindow):
         except OSError as e:
             fail(str(e))
             return
-        self.db = db
+        self._apply_dxcc(db)
         ver = db.version.isoformat() if db.version else "?"
         log.info("cty.dat updated to %s", ver)
         msg = tr("cty.dat updated: {n} entities, version {ver}.", n=len(db.entities), ver=ver)
@@ -790,6 +863,8 @@ class MainWindow(QMainWindow):
 
     # ================================================================ shutdown
     def closeEvent(self, e) -> None:
+        self._save_timer.stop()
+        self._save_spot_view()
         self.s["geometry"] = bytes(self.saveGeometry().toBase64()).decode()
         self.s["window_state"] = bytes(self.saveState(self.STATE_VERSION).toBase64()).decode()
         self.s.save()

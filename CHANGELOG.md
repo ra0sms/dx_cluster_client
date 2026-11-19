@@ -8,20 +8,32 @@ All notable changes to DX Cluster Client are documented in this file. The format
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-19
+
 ### Added
 
 - Changelog in English and Russian.
 - Screenshots in the English and Russian READMEs.
+- CI test workflow on push and pull requests (Linux and Windows, Python 3.10 and 3.12).
+- Age column and copying selected spots with Ctrl+C.
+- The spot table remembers column widths, order and sorting.
 
 ### Changed
 
-- READMEs refreshed for 0.3.2: Alarm behavior, duplicate counter, cluster list refresh, project layout.
+- READMEs refreshed: Alarm behavior, duplicate counter, cluster list refresh, project layout.
+- `settings.json` and `cty.dat` writes are fsynced before the atomic rename.
+- Settings are saved with a short debounce instead of on every filter change.
+- CI runs `ruff` in addition to `pytest`.
 
 ### Fixed
 
 - Alarm: removing or disabling a watch-list rule now also drops the spots it already collected from
   the Alarm tab and resets the unread badge; previously those matches stayed until they aged out
   (24 h) or were cleared manually, so it looked like spots kept arriving.
+- Damaged `custom_clusters` entries or non-string window geometry values no longer prevent the
+  application from starting.
+- The cluster list cache is written atomically.
+- Country lists and the entities of already shown spots are refreshed after a `cty.dat` update.
 
 ## [0.3.2] — 2026-11-17
 

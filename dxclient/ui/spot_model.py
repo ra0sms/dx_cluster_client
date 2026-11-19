@@ -13,9 +13,10 @@ from ..core.spot import Spot
 from ..i18n import tr
 from .qt_compat import change_filter
 
-COLUMNS = ["Time", "Freq", "DX", "Country", "Cont", "Az", "km", "Band", "Mode", "Comment", "Spotter", "Sp. cont"]
-(COL_TIME, COL_FREQ, COL_DX, COL_COUNTRY, COL_CONT, COL_AZ, COL_DIST, COL_BAND, COL_MODE, COL_COMMENT,
- COL_SPOTTER, COL_SPCONT) = range(len(COLUMNS))
+COLUMNS = ["Time", "Age", "Freq", "DX", "Country", "Cont", "Az", "km", "Band", "Mode", "Comment",
+           "Spotter", "Sp. cont"]
+(COL_TIME, COL_AGE, COL_FREQ, COL_DX, COL_COUNTRY, COL_CONT, COL_AZ, COL_DIST, COL_BAND, COL_MODE,
+ COL_COMMENT, COL_SPOTTER, COL_SPCONT) = range(len(COLUMNS))
 
 BAND_COLORS = {
     "160m": "#8e44ad", "80m": "#2c7fb8", "60m": "#16a085", "40m": "#27ae60",
@@ -61,6 +62,8 @@ class SpotTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole:
             if c == COL_TIME:
                 return s.time
+            if c == COL_AGE:
+                return self._age_text(s)
             if c == COL_FREQ:
                 return f"{s.freq:.1f}"
             if c == COL_DX:
@@ -86,6 +89,8 @@ class SpotTableModel(QAbstractTableModel):
         elif role == SORT_ROLE:
             if c == COL_TIME:
                 return (s.when or s.received).timestamp()
+            if c == COL_AGE:
+                return s.age_minutes(self._now)
             if c == COL_FREQ:
                 return s.freq
             if c == COL_AZ:
@@ -108,6 +113,8 @@ class SpotTableModel(QAbstractTableModel):
             if c == COL_DX or s.alarm and c == COL_FREQ:
                 return self._bold
         elif role == Qt.ItemDataRole.ToolTipRole:
+            if c == COL_AGE:
+                return tr("Minutes since the spot was reported")
             if c in (COL_DX, COL_COUNTRY) and s.dx_entity:
                 e = s.dx_entity
                 tip = f"{e.name} ({e.prefix}) — {e.continent}, CQ {e.cq}, ITU {e.itu}"
@@ -117,6 +124,16 @@ class SpotTableModel(QAbstractTableModel):
             if c == COL_COMMENT:
                 return s.comment
         return None
+
+    def _age_text(self, spot: Spot) -> str:
+        """Compact age: 'now', '12m', '1h05'."""
+        minutes = int(spot.age_minutes(self._now))
+        if minutes < 1:
+            return tr("now")
+        if minutes < 60:
+            return f"{minutes}{tr('m')}"
+        hours, rest = divmod(minutes, 60)
+        return f"{hours}{tr('h')}" + (f"{rest:02d}" if rest else "")
 
     def add_spot(self, spot: Spot, dupe_minutes: int = 0) -> Spot | None:
         """Insert a spot on top. With dupe_minutes > 0 a previous spot of the same station on the
@@ -159,11 +176,11 @@ class SpotTableModel(QAbstractTableModel):
         return len(rows)
 
     def tick(self, now: datetime | None = None) -> None:
-        """Refresh age-dependent colours."""
+        """Refresh the Age column and age-dependent colours."""
         self._now = now or datetime.now(timezone.utc)
-        if self.fade_minutes and self.spots:
+        if self.spots:
             self.dataChanged.emit(self.index(0, 0), self.index(len(self.spots) - 1, len(COLUMNS) - 1),
-                                  [Qt.ItemDataRole.ForegroundRole])
+                                  [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ForegroundRole])
 
     def _insert(self, spot: Spot) -> None:
         self.beginInsertRows(QModelIndex(), 0, 0)
@@ -253,13 +270,13 @@ class SpotFilterProxy(QSortFilterProxyModel):
 
 
 # Compact default widths; the Comment column takes the remaining space.
-_COL_WIDTHS = {COL_TIME: 58, COL_FREQ: 72, COL_DX: 92, COL_COUNTRY: 135, COL_CONT: 40, COL_AZ: 44,
-               COL_DIST: 52, COL_BAND: 50, COL_MODE: 46, COL_SPOTTER: 85, COL_SPCONT: 52}
+_COL_WIDTHS = {COL_TIME: 58, COL_AGE: 52, COL_FREQ: 72, COL_DX: 92, COL_COUNTRY: 135, COL_CONT: 40,
+               COL_AZ: 44, COL_DIST: 52, COL_BAND: 50, COL_MODE: 46, COL_SPOTTER: 85, COL_SPCONT: 52}
 
 
 def setup_spot_view(view: QTableView) -> None:
     view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-    view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
     view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     view.setAlternatingRowColors(True)
     view.setWordWrap(False)

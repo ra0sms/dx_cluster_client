@@ -55,6 +55,27 @@ def test_damaged_cluster_cache_gives_empty_list(tmp_path):
     assert load_cache(p) == []
 
 
+def test_custom_nodes_tolerate_bad_items():
+    from dxclient.core.cluster_list import parse_custom_nodes
+
+    nodes = parse_custom_nodes([
+        {"host": "a.example", "port": 7300},
+        {"host": "b.example", "port": "8000", "name": "B"},
+        {"host": "a.example", "port": 7300},  # duplicate
+        {"host": "c.example"},  # no port
+        {"host": "", "port": 1},
+        {"host": "d.example", "port": "abc"},
+        {"host": "e.example", "port": 70000},
+        "garbage",
+        None,
+    ])
+    assert [(n.name, n.host, n.port, n.custom) for n in nodes] == [
+        ("a.example", "a.example", 7300, True),
+        ("B", "b.example", 8000, True),
+    ]
+    assert parse_custom_nodes("not a list") == []
+
+
 # ---------------------------------------------------------------- settings
 def test_settings_with_wrong_types_fall_back_to_defaults(tmp_path):
     path = tmp_path / "settings.json"
@@ -76,6 +97,20 @@ def test_settings_with_wrong_types_fall_back_to_defaults(tmp_path):
     assert s["login_commands"] == ["sh/dx 30"]
     assert s["cluster_history"] == DEFAULTS["cluster_history"]
     assert s["custom_option"] == "kept"
+
+
+def test_settings_drops_non_string_geometry(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"geometry": 123, "window_state": ["x"]}), encoding="utf-8")
+    s = Settings(path)
+    assert s["geometry"] is None and s["window_state"] is None
+
+
+def test_settings_drops_invalid_spot_sort_order(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"spot_sort_order": "sideways"}), encoding="utf-8")
+    s = Settings(path)
+    assert s["spot_sort_order"] == DEFAULTS["spot_sort_order"]
 
 
 def test_settings_list_items_of_the_wrong_kind_are_dropped(tmp_path):
@@ -102,6 +137,16 @@ def test_atomic_write_replaces_content_without_leftovers(tmp_path):
     atomic_write(target, "новый", encoding="cp1251")
     assert target.read_bytes() == "новый".encode("cp1251")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["cty.dat"]
+
+
+def test_atomic_write_bytes_replaces_content_without_leftovers(tmp_path):
+    from dxclient.core.settings import atomic_write_bytes
+
+    target = tmp_path / "clusters.json"
+    target.write_bytes(b"old")
+    atomic_write_bytes(target, b'{"nodes": []}')
+    assert target.read_bytes() == b'{"nodes": []}'
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["clusters.json"]
 
 
 # ---------------------------------------------------------------- filters and alarms

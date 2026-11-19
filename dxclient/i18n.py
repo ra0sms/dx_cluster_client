@@ -36,6 +36,7 @@ _RU: dict[str, str] = {
     "cty.dat update failed: {msg}": "Ошибка обновления cty.dat: {msg}",
     # spot columns
     "Time": "Время",
+    "Age": "Возраст",
     "Freq": "Частота",
     "DX": "DX",
     "Country": "Страна",
@@ -47,6 +48,8 @@ _RU: dict[str, str] = {
     "Sp. cont": "К. сп.",
     # spot context menu
     "Open in QRZ.com": "Открыть на QRZ.com",
+    "Copy": "Копировать",
+    "Copied {n} rows": "Скопировано строк: {n}",
     "Copy callsign": "Копировать позывной",
     "Add to Alarm": "Добавить в Alarm",
     "Add country to Alarm": "Добавить страну в Alarm",
@@ -161,10 +164,13 @@ _RU: dict[str, str] = {
     "Az": "Аз",
     "km": "км",
     "Spotted {n} times": "Спотов: {n}",
+    "Minutes since the spot was reported": "Сколько минут назад был спот",
     "Error": "Ошибка",
     "An unexpected error occurred. Details are saved to the log:\n{path}":
         "Произошла непредвиденная ошибка. Подробности сохранены в журнал:\n{path}",
     "min": "мин",
+    "now": "сейчас",
+    "m": "м",
     "keep": "не удалять",
     "off": "выкл",
     "no limit": "без ограничения",

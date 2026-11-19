@@ -242,6 +242,43 @@ def _destroy(widget):
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
+def test_window_survives_bad_geometry_values(app, tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from dxclient.core.settings import Settings
+    from dxclient.ui.main_window import MainWindow
+
+    s = Settings(tmp_path / "s.json")
+    # simulate a damaged file that bypassed Settings._sanitize
+    s.data.update(callsign="N0CALL", server_enabled=False, check_updates=False, auto_update_cty=False,
+                  alarms=[], filter=None, geometry=123, window_state=["x"])
+    w = MainWindow(s)  # must not raise
+    w.close()
+
+
+def test_clusters_tab_tolerates_bad_custom_nodes(app, tmp_path):
+    from dxclient.ui.clusters_tab import ClustersTab
+
+    tab = ClustersTab(tmp_path / "clusters.json", [
+        {"host": "a.example"},  # no port
+        {"host": "b.example", "port": "abc"},
+        {"host": "c.example", "port": 7373},
+    ])
+    assert [(n.name, n.host, n.port) for n in tab.custom] == [("c.example", "c.example", 7373)]
+    _destroy(tab)
+
+
+def test_cty_update_refreshes_country_lists(app, tmp_path, monkeypatch):
+    from dxclient.core.dxcc import Entity
+
+    w = _window(tmp_path, monkeypatch)
+    db = w.db
+    db.entities.append(Entity("Testland", "TEST", "EU", 1, 1, 0.0, 0.0))
+    w._apply_dxcc(db)
+    assert "Testland" in w.filter_panel.countries
+    assert "Testland" in w.alarm_tab.countries
+    w.close()
+
+
 def test_alarm_pattern_is_uppercase_in_call_mode(app):
     from dxclient.core.alarms import KIND_CALL, KIND_COUNTRY
     from dxclient.ui.alarm_tab import AlarmEntryDialog
@@ -355,4 +392,62 @@ def test_removing_an_alarm_rule_drops_its_matches(app, tmp_path, monkeypatch):
     w._on_line(line.replace("1234Z", "1235Z"))  # a new spot no longer matches
     assert w.alarm_tab.model.rowCount() == 0
     assert w.unread_alarms == 0
+    w.close()
+
+
+def test_settings_are_saved_with_debounce(app, tmp_path, monkeypatch):
+    w = _window(tmp_path, monkeypatch)
+    w._save_timer.stop()
+    w.s.path.unlink(missing_ok=True)
+    w._set("max_age_minutes", 90)
+    assert not w.s.path.exists()  # the debounce timer has not fired yet
+    QTest.qWait(600)
+    assert w.s.path.exists()
+    assert '"max_age_minutes": 90' in w.s.path.read_text(encoding="utf-8")
+    w.close()
+
+
+def test_spot_view_state_is_restored(app, tmp_path, monkeypatch):
+    from dxclient.core.settings import Settings
+    from dxclient.ui.main_window import MainWindow
+    from dxclient.ui.spot_model import COL_COUNTRY, COL_DX
+
+    w = _window(tmp_path, monkeypatch)
+    w.spot_view.setColumnWidth(COL_DX, 155)
+    w.spot_view.sortByColumn(COL_COUNTRY, Qt.SortOrder.AscendingOrder)
+    w.close()
+
+    w2 = MainWindow(Settings(tmp_path / "s.json"))
+    assert w2.spot_view.columnWidth(COL_DX) == 155
+    header = w2.spot_view.horizontalHeader()
+    assert header.sortIndicatorSection() == COL_COUNTRY
+    assert header.sortIndicatorOrder() == Qt.SortOrder.AscendingOrder
+    w2.close()
+
+
+def test_age_column_and_copy_selected_rows(app, tmp_path, monkeypatch):
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtWidgets import QAbstractItemView
+
+    from dxclient.i18n import tr
+    from dxclient.ui.spot_model import COL_AGE, SpotTableModel
+
+    ja = "DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z"
+    vp8 = "DX de W1AW:      28495.0  VP8LP        SSB 59                          1236Z"
+
+    model = SpotTableModel()
+    model.add_spot(_spot(ja, 30))
+    model.add_spot(_spot(vp8, 0))
+    model.tick()  # refresh the model's "now" after the spots were created
+    assert model.data(model.index(0, COL_AGE)) == tr("now")
+    assert model.data(model.index(1, COL_AGE)) == "30" + tr("m")
+
+    w = _window(tmp_path, monkeypatch)
+    assert w.spot_view.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection
+    w.spot_model.add_spot(_spot(ja, 0))
+    w.spot_model.add_spot(_spot(vp8, 0))
+    w.spot_view.selectAll()
+    w._copy_view(w.spot_view)
+    text = QGuiApplication.clipboard().text()
+    assert "JA1ABC" in text and "VP8LP" in text and "\n" in text
     w.close()

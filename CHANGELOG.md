@@ -8,6 +8,11 @@ All notable changes to DX Cluster Client are documented in this file. The format
 
 ## [Unreleased]
 
+### Fixed
+
+- Alarm: when the selected match was removed by age, the table jumped to the last row (the oldest
+  spot); the viewport is now preserved and the removed selection is cleared instead.
+
 ## [0.4.0] — 2026-11-19
 
 ### Added

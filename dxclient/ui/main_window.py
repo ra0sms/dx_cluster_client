@@ -540,7 +540,7 @@ class MainWindow(QMainWindow):
         if self.clock.calibrated and self.s["max_age_minutes"]:
             self.spot_model.remove_older_than(self.s["max_age_minutes"], now)
         if self.clock.calibrated and self.s["alarm_max_age_hours"]:
-            self.alarm_tab.model.remove_older_than(self.s["alarm_max_age_hours"] * 60, now)
+            self.alarm_tab.remove_older_than(self.s["alarm_max_age_hours"] * 60, now)
         self.spot_model.tick(now)
         self.alarm_tab.model.tick(now)
         self._update_counts()
@@ -708,7 +708,7 @@ class MainWindow(QMainWindow):
         self.spot_model.refresh_alarm_flags()
         # A removed or disabled rule must also drop its old matches from the Alarm tab,
         # otherwise the tab keeps showing spots the user no longer wants to watch.
-        if self.alarm_tab.model.remove_where(lambda s: self.alarms.find(s) is not None):
+        if self.alarm_tab.remove_where(lambda s: self.alarms.find(s) is not None):
             if not self.alarm_tab.model.spots:
                 self.unread_alarms = 0
             self._update_alarm_tab_title()

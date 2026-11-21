@@ -1,7 +1,9 @@
 """Alarm tab (matching spots) and the separate watch-list window."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from datetime import datetime
+
+from PySide6.QtCore import QModelIndex, Qt, Signal
 from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout,
@@ -348,6 +350,37 @@ class AlarmTab(QWidget):
     def set_options(self, sound: bool, popup: bool) -> None:
         self.sound_cb.setChecked(sound)
         self.popup_cb.setChecked(popup)
+
+    # ------------------------------------------------------------- aging/removal
+    def remove_older_than(self, minutes: int, now: datetime) -> int:
+        """Drop aged matches without letting the table jump to the oldest remaining spot."""
+        return self._remove_preserving_view(
+            lambda: self.model.remove_older_than(minutes, now),
+            lambda s: s.age_minutes(now) > minutes,
+        )
+
+    def remove_where(self, keep) -> int:
+        """Drop matches rejected by `keep`, preserving the viewport the same way."""
+        return self._remove_preserving_view(
+            lambda: self.model.remove_where(keep),
+            lambda s: not keep(s),
+        )
+
+    def _remove_preserving_view(self, remove, will_remove) -> int:
+        view = self.view
+        bar = view.verticalScrollBar()
+        offset = bar.value()
+        current = (self.model.spot_at(view.currentIndex().row())
+                   if view.currentIndex().isValid() else None)
+        if current is not None and will_remove(current):
+            # QTableView would otherwise select the last remaining row when the current
+            # one disappears, which scrolls the whole Alarm list to the oldest spot.
+            view.selectionModel().clearSelection()
+            view.setCurrentIndex(QModelIndex())
+        removed = remove()
+        if removed:
+            bar.setValue(min(offset, bar.maximum()))
+        return removed
 
     def _dlg(self) -> WatchListDialog:
         if self._dialog is None:

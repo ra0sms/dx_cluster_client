@@ -171,6 +171,49 @@ def test_alarm_cleanup_and_clear_all(app, tmp_path, monkeypatch):
     w.close()
 
 
+def test_alarm_aging_does_not_jump_to_oldest(app):
+    """When the selected Alarm spot ages out, the table must keep its viewport instead
+    of selecting the last row and scrolling to the oldest remaining spot."""
+    from datetime import datetime, timedelta, timezone
+
+    from dxclient.core.spot import Spot
+    from dxclient.ui.alarm_tab import AlarmTab
+
+    now = datetime.now(timezone.utc)
+    tab = AlarmTab([])
+    tab.resize(900, 400)
+    tab.show()
+    app.processEvents()
+
+    def make(i: int, minutes: int) -> Spot:
+        s = Spot(freq=14025.0 + i * 0.1, dx=f"K{i}AA", spotter="W1AW", comment="CQ",
+                 time="1200", band="20m", mode="CW")
+        s.when = now - timedelta(minutes=minutes)
+        s.received = s.when
+        return s
+
+    for age in range(30, 0, -1):  # oldest first: the newest spot ends up on top
+        tab.model.add_spot(make(age, age))
+    app.processEvents()
+    tab.view.setCurrentIndex(tab.model.index(0, 0))
+    tab.view.verticalScrollBar().setValue(0)
+
+    for i in range(40):  # new matches push the current spot down the table
+        tab.model.add_spot(make(100 + i, 0))
+    app.processEvents()
+    for s in tab.model.spots[-30:]:  # all original spots are now 60 min old
+        s.when = now - timedelta(minutes=60)
+
+    before = tab.view.verticalScrollBar().value()
+    removed = tab.remove_older_than(30, now)
+    app.processEvents()
+
+    assert removed == 30 and tab.model.rowCount() == 40
+    assert tab.view.verticalScrollBar().value() == before
+    assert not tab.view.currentIndex().isValid()  # no automatic jump to the last row
+    tab.close()
+
+
 def _window(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     from dxclient.core.settings import Settings

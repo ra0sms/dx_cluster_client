@@ -112,6 +112,7 @@ dxclient/
   i18n.py    переводы ru/en
   data/      cty.dat, иконка, звук alarm
 packaging/   скрипты сборки AppImage / Windows, иконки, .desktop-файл
+docs/        схема архитектуры (SVG и PNG-превью)
 pics/        скриншоты для README
 tests/       тесты pytest (ядро, UI, устойчивость, история часов)
 ```

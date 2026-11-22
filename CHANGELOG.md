@@ -8,10 +8,25 @@ All notable changes to DX Cluster Client are documented in this file. The format
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-11-22
+
+### Added
+
+- Architecture diagram in `docs/` (SVG and PNG previews).
+
 ### Fixed
 
 - Alarm: when the selected match was removed by age, the table jumped to the last row (the oldest
   spot); the viewport is now preserved and the removed selection is cleared instead.
+- The Spots table now keeps its viewport when old spots age out, using the same logic as Alarm.
+- Out-of-range integer settings are clamped on load; negative ages no longer empty the tables.
+- Atomic writes repair the permissions of a stale `.tmp` file, keeping `settings.json` at `0600`.
+- Cluster addresses reject ports outside 1..65535 and accept bracketed IPv6 addresses.
+- After a `cty.dat` update the Alarm flags are recalculated and matches that no longer fit are
+  dropped; older downloads are rejected and the previous file is kept as `cty.dat.bak`.
+- The unread Alarm badge is clamped when matches are removed; Clear resets it and Clear all resets
+  the repeat-notification history.
+- A connection attempt now times out after 15 seconds and goes through the normal reconnect backoff.
 
 ## [0.4.0] — 2026-11-19
 

@@ -163,16 +163,40 @@ def load_cache(path: Path) -> list[ClusterNode]:
 
 
 def parse_address(text: str, default_port: int = 7300) -> tuple[str, int] | None:
-    """'host:port' or 'host port' or 'host' → (host, port)."""
+    """'host:port', 'host port' or 'host' → (host, port).
+
+    IPv6 hosts must be bracketed (`[::1]:7300`); unbracketed IPv6 is rejected because the
+    port separator would be ambiguous. Ports outside 1..65535 are rejected."""
     text = text.strip()
     if not text:
         return None
-    for sep in (":", " "):
-        if sep in text:
-            host, _, port = text.rpartition(sep)
-            host = host.strip()
-            try:
-                return (host, int(port)) if host else None
-            except ValueError:
-                return None
-    return text, default_port
+    if text.startswith("["):
+        end = text.find("]")
+        if end < 0:
+            return None
+        host = text[1:end].strip()
+        rest = text[end + 1:].strip()
+        if rest and not rest.startswith(":"):
+            return None
+        port_text = rest[1:].strip() if rest else ""
+    elif text.count(":") > 1:
+        return None  # unbracketed IPv6
+    elif ":" in text:
+        host, _, port_text = text.rpartition(":")
+        host = host.strip()
+        port_text = port_text.strip()
+    elif " " in text:
+        host, _, port_text = text.partition(" ")
+        host = host.strip()
+        port_text = port_text.strip()
+    else:
+        host, port_text = text, ""
+    if not host:
+        return None
+    if not port_text:
+        return host, default_port
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None
+    return (host, port) if 1 <= port <= 65535 else None

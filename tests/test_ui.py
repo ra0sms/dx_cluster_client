@@ -225,6 +225,86 @@ def _window(tmp_path, monkeypatch):
     return MainWindow(s)
 
 
+def test_spot_aging_keeps_scroll_position(app, tmp_path, monkeypatch):
+    """The main Spots table must not jump to the oldest row when the current spot ages out."""
+    from datetime import datetime, timedelta, timezone
+
+    from dxclient.core.spot import Spot
+    from dxclient.ui.spot_model import COL_TIME
+
+    now = datetime.now(timezone.utc)
+    w = _window(tmp_path, monkeypatch)
+    w.resize(1000, 500)
+    w.show()
+    app.processEvents()
+
+    def make(i: int, minutes: int) -> Spot:
+        s = Spot(freq=14025.0 + i * 0.1, dx=f"K{i}AA", spotter="W1AW", comment="CQ",
+                 time="1200", band="20m", mode="CW")
+        s.when = now - timedelta(minutes=minutes)
+        s.received = s.when
+        return s
+
+    for age in range(30, 0, -1):
+        w.spot_model.add_spot(make(age, age))
+    app.processEvents()
+    w.spot_view.sortByColumn(COL_TIME, Qt.SortOrder.DescendingOrder)
+    w.spot_view.setCurrentIndex(w.proxy.index(0, 0))
+    w.spot_view.verticalScrollBar().setValue(0)
+
+    for i in range(40):
+        w.spot_model.add_spot(make(100 + i, 0))
+    app.processEvents()
+    for s in w.spot_model.spots[-30:]:  # the original 30 spots are now old
+        s.when = now - timedelta(minutes=120)
+    for _ in range(5):  # calibrated clock so _age_tick may remove rows
+        w.clock.feed(f"{now:%H%M}", now)
+
+    before = w.spot_view.verticalScrollBar().value()
+    w._age_tick()
+    app.processEvents()
+
+    assert w.spot_model.rowCount() == 40
+    assert w.spot_view.verticalScrollBar().value() == before
+    assert not w.spot_view.currentIndex().isValid()
+    w.close()
+
+
+def test_alarm_clear_resets_unread_badge(app, tmp_path, monkeypatch):
+    from dxclient.i18n import tr
+
+    w = _window(tmp_path, monkeypatch)
+    w.alarm_tab.model.add_spot(_spot("DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z", 0))
+    w.unread_alarms = 2
+    w._update_alarm_tab_title()
+    w.alarm_tab.clear_btn.click()
+    app.processEvents()
+
+    assert w.alarm_tab.model.rowCount() == 0
+    assert w.unread_alarms == 0
+    assert w.tabs.tabText(1) == tr("Alarm")
+    w.close()
+
+
+def test_removing_one_rule_clamps_unread_badge(app, tmp_path, monkeypatch):
+    from dxclient.core.alarms import AlarmEntry
+
+    w = _window(tmp_path, monkeypatch)
+    w.alarms.entries = [AlarmEntry("JA1ABC"), AlarmEntry("VP8*")]
+    w._alarms_changed(w.alarms.entries)
+    w._on_line("DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z")
+    w._on_line("DX de W1AW:      28495.0  VP8LP        SSB 59                          1236Z")
+    assert w.alarm_tab.model.rowCount() == 2
+
+    w.unread_alarms = 2
+    w.alarms.entries.pop(0)
+    w._alarms_changed(w.alarms.entries)
+
+    assert w.alarm_tab.model.rowCount() == 1
+    assert w.unread_alarms == 1
+    w.close()
+
+
 def test_wrong_pc_clock_does_not_drop_spots(app, tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
@@ -250,6 +330,32 @@ def test_repeated_shdx_is_ignored(app, tmp_path, monkeypatch):
     w._on_line(line)  # sh/dx again after a reconnect
     assert w.spot_model.rowCount() == 1 and w.spot_model.spots[0].count == 1
     w.close()
+
+
+def test_connect_timeout_aborts_and_reconnects(app):
+    from PySide6.QtNetwork import QAbstractSocket
+
+    from dxclient.core import telnet_client as tc
+
+    class FakeSocket:
+        aborted = False
+
+        def state(self):
+            return QAbstractSocket.SocketState.ConnectingState
+
+        def abort(self):
+            self.aborted = True
+
+    c = tc.ClusterClient()
+    fake = FakeSocket()
+    c._sock = fake
+    c.host = "example.invalid"
+    c.RECONNECT_DELAYS = [0]
+    c._connect_timed_out()
+
+    assert fake.aborted
+    assert c.state == tc.STATE_RECONNECT_WAIT
+    c._reconnect.stop()
 
 
 def test_watchdog_reconnects_silent_connection(app):
@@ -308,6 +414,64 @@ def test_clusters_tab_tolerates_bad_custom_nodes(app, tmp_path):
     ])
     assert [(n.name, n.host, n.port) for n in tab.custom] == [("c.example", "c.example", 7373)]
     _destroy(tab)
+
+
+def test_cty_update_recomputes_alarm_flags(app, tmp_path, monkeypatch):
+    from dxclient.core.alarms import KIND_COUNTRY, AlarmEntry
+    from dxclient.core.dxcc import DxccDB, Entity
+    from dxclient.core.spot import Spot
+
+    w = _window(tmp_path, monkeypatch)
+    w.alarms.entries = [AlarmEntry("Testland", kind=KIND_COUNTRY)]
+    s = Spot(14025.0, "K1ABC", "W1AW", "CW", "12:00", band="20m", mode="CW")
+    s.dx_entity = Entity("Oldland", "K1ABC", "NA", 5, 5)
+    s.alarm = False
+    w.spot_model.add_spot(s)
+    w.alarm_tab.model.add_spot(s)
+
+    db = DxccDB()
+    ent = Entity("Testland", "K1ABC", "EU", 1, 1, 0.0, 0.0)
+    db.entities = [ent]
+    db._prefixes = {"K1ABC": ent}
+    db._max_len = 5
+    w._apply_dxcc(db)
+
+    assert s.dx_entity == ent and s.alarm is True
+    assert w.alarm_tab.model.rowCount() == 1
+
+    w.alarms.entries = [AlarmEntry("Otherland", kind=KIND_COUNTRY)]
+    w._apply_dxcc(db)
+    assert s.alarm is False
+    assert w.alarm_tab.model.rowCount() == 0
+    w.close()
+
+
+def test_cty_update_rejects_an_older_file(app, tmp_path, monkeypatch):
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtNetwork import QNetworkReply
+
+    from dxclient.core.settings import config_dir
+
+    class Reply:
+        def deleteLater(self):
+            pass
+
+        def error(self):
+            return QNetworkReply.NetworkError.NoError
+
+        def readAll(self):
+            return QByteArray(text.encode("latin-1"))
+
+    text = "=VER20200101;" + ";".join(
+        f"T{i}:1:1:EU:0:0:0:T{i}:" for i in range(300)
+    ) + ";"
+    w = _window(tmp_path, monkeypatch)
+    old = w.db
+    w._cty_done(Reply(), silent=True)
+
+    assert w.db is old
+    assert not (config_dir() / "cty.dat").exists()
+    w.close()
 
 
 def test_cty_update_refreshes_country_lists(app, tmp_path, monkeypatch):

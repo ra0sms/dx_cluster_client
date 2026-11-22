@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import QModelIndex, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QValidator
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QCompleter, QDialog, QDialogButtonBox, QFormLayout,
@@ -15,6 +15,7 @@ from ..core.alarms import KIND_CALL, KIND_COUNTRY, AlarmEntry
 from ..core.bands import BAND_NAMES, MODES, mode_label
 from ..i18n import tr
 from .spot_model import SpotTableModel, setup_spot_view
+from .view_utils import remove_preserving_view
 
 
 class _UpperValidator(QValidator):
@@ -282,6 +283,7 @@ class AlarmTab(QWidget):
     entries_changed = Signal(list)  # list[AlarmEntry]
     options_changed = Signal(bool, bool)  # sound, popup
     spot_activated = Signal(object)
+    cleared = Signal()
 
     def __init__(self, countries: list[str], parent=None) -> None:
         super().__init__(parent)
@@ -313,7 +315,7 @@ class AlarmTab(QWidget):
         self.view.setModel(self.model)
         setup_spot_view(self.view)
         self.view.doubleClicked.connect(lambda idx: self.spot_activated.emit(self.model.spot_at(idx.row())))
-        self.clear_btn.clicked.connect(self.model.clear)
+        self.clear_btn.clicked.connect(self._clear)
         lay.addWidget(self.view)
         self.retranslate()
 
@@ -326,6 +328,10 @@ class AlarmTab(QWidget):
         self.model.retranslate()
         if self._dialog is not None:
             self._dialog.retranslate()
+
+    def _clear(self) -> None:
+        self.model.clear()
+        self.cleared.emit()
 
     def _update_watch_btn(self) -> None:
         active = sum(1 for e in self.entries if e.enabled)
@@ -367,20 +373,9 @@ class AlarmTab(QWidget):
         )
 
     def _remove_preserving_view(self, remove, will_remove) -> int:
-        view = self.view
-        bar = view.verticalScrollBar()
-        offset = bar.value()
-        current = (self.model.spot_at(view.currentIndex().row())
-                   if view.currentIndex().isValid() else None)
-        if current is not None and will_remove(current):
-            # QTableView would otherwise select the last remaining row when the current
-            # one disappears, which scrolls the whole Alarm list to the oldest spot.
-            view.selectionModel().clearSelection()
-            view.setCurrentIndex(QModelIndex())
-        removed = remove()
-        if removed:
-            bar.setValue(min(offset, bar.maximum()))
-        return removed
+        idx = self.view.currentIndex()
+        current = self.model.spot_at(idx.row()) if idx.isValid() else None
+        return remove_preserving_view(self.view, remove, current, will_remove)
 
     def _dlg(self) -> WatchListDialog:
         if self._dialog is None:

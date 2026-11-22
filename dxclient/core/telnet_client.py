@@ -87,6 +87,7 @@ class ClusterClient(QObject):
     # The keepalive (empty line every 5 min) makes clusters answer with a prompt, so a healthy
     # connection is never silent that long.
     WATCHDOG_S = 15 * 60
+    CONNECT_TIMEOUT_MS = 15_000
     RECONNECT_DELAYS = [5, 10, 30, 60, 120]
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -118,6 +119,9 @@ class ClusterClient(QObject):
         self._reconnect = QTimer(self)
         self._reconnect.setSingleShot(True)
         self._reconnect.timeout.connect(self._do_connect)
+        self._connect_timeout = QTimer(self)
+        self._connect_timeout.setSingleShot(True)
+        self._connect_timeout.timeout.connect(self._connect_timed_out)
         self._login_fallback = QTimer(self)
         self._login_fallback.setSingleShot(True)
         self._login_fallback.timeout.connect(self._send_login)
@@ -143,6 +147,7 @@ class ClusterClient(QObject):
     def disconnect_from(self) -> None:
         self._user_disconnect = True
         self._reconnect.stop()
+        self._connect_timeout.stop()
         self._keepalive.stop()
         self._login_fallback.stop()
         self._after_login_timer.stop()
@@ -171,8 +176,10 @@ class ClusterClient(QObject):
         self._set_state(STATE_CONNECTING)
         self._sock.abort()
         self._sock.connectToHost(self.host, self.port)
+        self._connect_timeout.start(self.CONNECT_TIMEOUT_MS)
 
     def _on_connected(self) -> None:
+        self._connect_timeout.stop()
         self._attempt = 0
         self._set_state(STATE_CONNECTED)
         log.info("connected to %s:%s", self.host, self.port)
@@ -183,6 +190,7 @@ class ClusterClient(QObject):
         self._login_fallback.start(8000)
 
     def _on_disconnected(self) -> None:
+        self._connect_timeout.stop()
         self._keepalive.stop()
         self._login_fallback.stop()
         self._after_login_timer.stop()
@@ -191,6 +199,18 @@ class ClusterClient(QObject):
             self.line_received.emit(decode_line(self._buf))
             self._buf = b""
         log.info("disconnected from %s:%s", self.host, self.port)
+        self._schedule_reconnect()
+
+    def _connect_timed_out(self) -> None:
+        if self._user_disconnect:
+            return
+        if self._sock.state() not in (QAbstractSocket.SocketState.HostLookupState,
+                                      QAbstractSocket.SocketState.ConnectingState):
+            return
+        log.warning("connection to %s:%s timed out", self.host, self.port)
+        self.error.emit("connection timed out")
+        self._sock.abort()
+        self._set_state(STATE_DISCONNECTED)
         self._schedule_reconnect()
 
     def _check_watchdog(self) -> None:

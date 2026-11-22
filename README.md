@@ -113,6 +113,7 @@ dxclient/
   i18n.py    ru/en translations
   data/      cty.dat, icon, alarm sound
 packaging/   AppImage / Windows build scripts, icons, .desktop file
+docs/        architecture diagram (SVG and PNG previews)
 pics/        screenshots used in this README
 tests/       pytest tests (core, UI, hardening, clock history)
 ```

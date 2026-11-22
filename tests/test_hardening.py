@@ -113,6 +113,27 @@ def test_settings_drops_invalid_spot_sort_order(tmp_path):
     assert s["spot_sort_order"] == DEFAULTS["spot_sort_order"]
 
 
+def test_settings_out_of_range_values_are_clamped(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({
+        "max_spots": 1,
+        "max_age_minutes": -5,
+        "alarm_max_age_hours": -1,
+        "dupe_minutes": 999,
+        "fresh_minutes": -5,
+        "alarm_repeat_minutes": -1,
+        "server_port": 0,
+    }), encoding="utf-8")
+    s = Settings(path)
+    assert s["max_spots"] == 100
+    assert s["max_age_minutes"] == 0
+    assert s["alarm_max_age_hours"] == 0
+    assert s["dupe_minutes"] == 240
+    assert s["fresh_minutes"] == 0
+    assert s["alarm_repeat_minutes"] == 0
+    assert s["server_port"] == 1024
+
+
 def test_settings_list_items_of_the_wrong_kind_are_dropped(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"alarms": [{"pattern": "3Y0*"}, "JA1ABC", 7]}), encoding="utf-8")
@@ -129,6 +150,20 @@ def test_settings_file_is_private_on_posix(tmp_path):
     mode = stat.S_IMODE((tmp_path / "settings.json").stat().st_mode)
     assert mode & 0o077 == 0  # no access for group or others
     assert not (tmp_path / "settings.json.tmp").exists()  # temporary file was renamed
+
+
+def test_atomic_write_fixes_permissions_of_a_stale_temp_file(tmp_path):
+    if os.name != "posix":
+        pytest.skip("POSIX permissions only")
+    target = tmp_path / "settings.json"
+    stale = tmp_path / "settings.json.tmp"
+    stale.write_text("old", encoding="utf-8")
+    os.chmod(stale, 0o644)
+
+    atomic_write(target, "new", mode=0o600)
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert not stale.exists()
 
 
 def test_atomic_write_replaces_content_without_leftovers(tmp_path):

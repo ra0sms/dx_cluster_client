@@ -77,6 +77,10 @@ class AlarmList:
                 return e
         return None
 
+    def clear_history(self) -> None:
+        """Forget notification timestamps, e.g. after the user clears all tables."""
+        self._last.clear()
+
     def should_notify(self, s: Spot, now: float | None = None) -> bool:
         """True if this call/band/mode was not notified within repeat_minutes."""
         now = time.monotonic() if now is None else now

@@ -67,15 +67,25 @@ DEFAULTS: dict[str, Any] = {
 def atomic_write_bytes(path: Path, data: bytes, *, mode: int = 0o644) -> None:
     """Atomically write binary data: a temporary file, fsync, rename and directory fsync."""
     tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW  # never follow a stale symlink left by someone else
+    fd = os.open(tmp, flags, mode)
     try:
+        has_fchmod = hasattr(os, "fchmod")
         with os.fdopen(fd, "wb") as f:
+            # O_CREAT only applies `mode` when the file is new. A leftover .tmp from a crash
+            # may still be 0644; fix it before writing the password-bearing settings file.
+            if has_fchmod:
+                os.fchmod(f.fileno(), mode)
             f.write(data)
             f.flush()
             try:
                 os.fsync(f.fileno())  # flush the data before the rename when supported
             except OSError:
                 pass  # some filesystems do not support fsync; the rename is still atomic
+        if not has_fchmod:
+            os.chmod(tmp, mode)  # Windows: no fchmod; set the mode before the rename
         tmp.replace(path)
     except OSError:
         try:
@@ -123,6 +133,16 @@ def _is_type(value: Any, default: Any) -> bool:
 _LIST_ITEM_TYPE = {"alarms": dict, "custom_clusters": dict, "cluster_history": str, "login_commands": str}
 # settings that may be None or a string (base64 geometry / dock / header state)
 _STR_OR_NONE = {"geometry", "window_state", "spot_header_state"}
+# integer settings that the UI limits to a range; a hand-edited value is clamped
+_RANGES = {
+    "max_spots": (100, 50000),
+    "max_age_minutes": (0, 1440),
+    "alarm_max_age_hours": (0, 720),
+    "dupe_minutes": (0, 240),
+    "fresh_minutes": (0, 240),
+    "alarm_repeat_minutes": (0, 240),
+    "server_port": (1024, 65535),
+}
 
 
 def _sanitize(stored: dict[str, Any]) -> dict[str, Any]:
@@ -146,6 +166,11 @@ def _sanitize(stored: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, list) and key in _LIST_ITEM_TYPE:
             kind = _LIST_ITEM_TYPE[key]
             value = [v for v in value if isinstance(v, kind)]
+        if key in _RANGES:
+            lo, hi = _RANGES[key]
+            if not lo <= value <= hi:
+                log.warning("setting %r is out of range (%r), clamping to %s..%s", key, value, lo, hi)
+                value = min(max(value, lo), hi)
         out[key] = value
     return out
 

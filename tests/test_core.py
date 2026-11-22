@@ -89,6 +89,15 @@ def test_filter(db):
     assert SpotFilter.from_dict(f.to_dict()) == f
 
 
+def test_alarm_history_can_be_cleared(db):
+    s = parse_spot("DX de RA3CO-#:    14025.0  3Y0J/P       CW 23 dB 25 WPM CQ             1234Z", db)
+    al = AlarmList([AlarmEntry("3Y0J")])
+    assert al.should_notify(s, now=0)
+    assert not al.should_notify(s, now=60)
+    al.clear_history()
+    assert al.should_notify(s, now=60)
+
+
 def test_alarms(db):
     s = parse_spot("DX de RA3CO-#:    14025.0  3Y0J/P       CW 23 dB 25 WPM CQ             1234Z", db)
     assert AlarmEntry("3Y0*").match(s)
@@ -124,6 +133,11 @@ def test_cluster_list():
     assert parse_address("ra3co.com:7373") == ("ra3co.com", 7373)
     assert parse_address("dxc.example.org 8000") == ("dxc.example.org", 8000)
     assert parse_address("host:abc") is None
+    assert parse_address("host:0") is None
+    assert parse_address("host:70000") is None
+    assert parse_address("[::1]:7300") == ("::1", 7300)
+    assert parse_address("[::1]") == ("::1", 7300)
+    assert parse_address("::1") is None
 
 
 def test_strip_telnet():

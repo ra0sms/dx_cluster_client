@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -39,6 +40,7 @@ from .filter_panel import FilterPanel
 from .send_spot import SendSpotDialog
 from .settings_dialog import SettingsDialog
 from .spot_model import COL_TIME, SpotFilterProxy, SpotTableModel, setup_spot_view
+from .view_utils import remove_preserving_view
 
 try:
     from PySide6.QtMultimedia import QSoundEffect
@@ -192,6 +194,7 @@ class MainWindow(QMainWindow):
         self.alarm_tab.entries_changed.connect(self._alarms_changed)
         self.alarm_tab.options_changed.connect(self._alarm_options)
         self.alarm_tab.spot_activated.connect(self._lookup)
+        self.alarm_tab.cleared.connect(self._alarm_tab_cleared)
         self.alarm_tab.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.alarm_tab.view.customContextMenuRequested.connect(self._alarm_spot_menu)
         self._add_copy_shortcut(self.alarm_tab.view)
@@ -534,11 +537,20 @@ class MainWindow(QMainWindow):
         self.alarm_tab.model.fade_minutes = self.s["alarm_max_age_hours"] * 60 // 2
         self._age_tick()
 
+    def _remove_spots_preserving_view(self, remove, will_remove) -> int:
+        idx = self.spot_view.currentIndex()
+        current = self.proxy.spot_at(idx.row()) if idx.isValid() else None
+        return remove_preserving_view(self.spot_view, remove, current, will_remove)
+
     def _age_tick(self) -> None:
         now = self.clock.now()
         # Age-based removal needs a calibrated clock; before that the PC clock may be hours off.
         if self.clock.calibrated and self.s["max_age_minutes"]:
-            self.spot_model.remove_older_than(self.s["max_age_minutes"], now)
+            max_age = self.s["max_age_minutes"]
+            self._remove_spots_preserving_view(
+                lambda: self.spot_model.remove_older_than(max_age, now),
+                lambda s: s.age_minutes(now) > max_age,
+            )
         if self.clock.calibrated and self.s["alarm_max_age_hours"]:
             self.alarm_tab.remove_older_than(self.s["alarm_max_age_hours"] * 60, now)
         self.spot_model.tick(now)
@@ -552,6 +564,7 @@ class MainWindow(QMainWindow):
     def _clear_all(self) -> None:
         self.spot_model.clear()
         self.alarm_tab.model.clear()
+        self.alarms.clear_history()
         self.unread_alarms = 0
         self._update_alarm_tab_title()
         self._update_counts()
@@ -679,6 +692,14 @@ class MainWindow(QMainWindow):
             self.tray.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 10000)
         QApplication.alert(self)
 
+    def _alarm_tab_cleared(self) -> None:
+        self.unread_alarms = 0
+        self._update_alarm_tab_title()
+
+    def _sync_unread(self) -> None:
+        self.unread_alarms = min(self.unread_alarms, self.alarm_tab.model.rowCount())
+        self._update_alarm_tab_title()
+
     def _update_alarm_tab_title(self) -> None:
         text = tr("Alarm") + (f" ({self.unread_alarms})" if self.unread_alarms else "")
         self.tabs.setTabText(1, text)
@@ -703,15 +724,14 @@ class MainWindow(QMainWindow):
     def _alarms_changed(self, entries: list[AlarmEntry]) -> None:
         self.alarms.entries = entries
         self._set("alarms", [e.to_dict() for e in entries])
-        for s in self.spot_model.spots:
-            s.alarm = self.alarms.find(s) is not None
-        self.spot_model.refresh_alarm_flags()
+        for model in (self.spot_model, self.alarm_tab.model):
+            for s in model.spots:
+                s.alarm = self.alarms.find(s) is not None
+            model.refresh_alarm_flags()
         # A removed or disabled rule must also drop its old matches from the Alarm tab,
         # otherwise the tab keeps showing spots the user no longer wants to watch.
-        if self.alarm_tab.remove_where(lambda s: self.alarms.find(s) is not None):
-            if not self.alarm_tab.model.spots:
-                self.unread_alarms = 0
-            self._update_alarm_tab_title()
+        self.alarm_tab.remove_where(lambda s: self.alarms.find(s) is not None)
+        self._sync_unread()
 
     def _alarm_options(self, sound: bool, popup: bool) -> None:
         self.s["alarm_sound"] = sound
@@ -774,8 +794,12 @@ class MainWindow(QMainWindow):
             for s in model.spots:
                 s.dx_entity = db.lookup(s.dx)
                 s.spotter_entity = db.lookup(s.spotter)
+                s.alarm = self.alarms.find(s) is not None
                 self._apply_geo(s)
             model.refresh_alarm_flags()
+        # Drop matches that no longer satisfy a country rule after the entity update.
+        self.alarm_tab.remove_where(lambda s: self.alarms.find(s) is not None)
+        self._sync_unread()
         # Re-run the current filter through the Qt-version-aware helper.
         self.proxy.set_filter(self.proxy.spot_filter)
         self._update_counts()
@@ -807,8 +831,18 @@ class MainWindow(QMainWindow):
         if len(db.entities) < 300:
             fail("invalid file")
             return
+        if self.db.version and db.version and db.version < self.db.version:
+            fail(f"remote version {db.version} is older than the current {self.db.version}")
+            return
+        target = config_dir() / "cty.dat"
         try:
-            atomic_write(config_dir() / "cty.dat", text, encoding="latin-1")
+            if target.exists():
+                shutil.copy2(target, target.with_name("cty.dat.bak"))
+        except OSError as e:
+            fail(str(e))
+            return
+        try:
+            atomic_write(target, text, encoding="latin-1")
         except OSError as e:
             fail(str(e))
             return

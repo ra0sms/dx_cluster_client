@@ -89,15 +89,6 @@ def test_filter(db):
     assert SpotFilter.from_dict(f.to_dict()) == f
 
 
-def test_alarm_history_can_be_cleared(db):
-    s = parse_spot("DX de RA3CO-#:    14025.0  3Y0J/P       CW 23 dB 25 WPM CQ             1234Z", db)
-    al = AlarmList([AlarmEntry("3Y0J")])
-    assert al.should_notify(s, now=0)
-    assert not al.should_notify(s, now=60)
-    al.clear_history()
-    assert al.should_notify(s, now=60)
-
-
 def test_alarms(db):
     s = parse_spot("DX de RA3CO-#:    14025.0  3Y0J/P       CW 23 dB 25 WPM CQ             1234Z", db)
     assert AlarmEntry("3Y0*").match(s)
@@ -110,6 +101,8 @@ def test_alarms(db):
     assert al.find(s)
     assert al.should_notify(s, now=0)
     assert not al.should_notify(s, now=60)
+    assert al.should_notify(s, now=700)
+    al.clear_history()
     assert al.should_notify(s, now=700)
 
 

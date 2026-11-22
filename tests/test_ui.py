@@ -234,8 +234,8 @@ def test_spot_aging_keeps_scroll_position(app, tmp_path, monkeypatch):
 
     now = datetime.now(timezone.utc)
     w = _window(tmp_path, monkeypatch)
-    w.resize(1000, 500)
-    w.show()
+    w.spot_view.resize(1000, 500)
+    w.spot_view.show()
     app.processEvents()
 
     def make(i: int, minutes: int) -> Spot:
@@ -267,42 +267,7 @@ def test_spot_aging_keeps_scroll_position(app, tmp_path, monkeypatch):
     assert w.spot_model.rowCount() == 40
     assert w.spot_view.verticalScrollBar().value() == before
     assert not w.spot_view.currentIndex().isValid()
-    w.close()
-
-
-def test_alarm_clear_resets_unread_badge(app, tmp_path, monkeypatch):
-    from dxclient.i18n import tr
-
-    w = _window(tmp_path, monkeypatch)
-    w.alarm_tab.model.add_spot(_spot("DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z", 0))
-    w.unread_alarms = 2
-    w._update_alarm_tab_title()
-    w.alarm_tab.clear_btn.click()
-    app.processEvents()
-
-    assert w.alarm_tab.model.rowCount() == 0
-    assert w.unread_alarms == 0
-    assert w.tabs.tabText(1) == tr("Alarm")
-    w.close()
-
-
-def test_removing_one_rule_clamps_unread_badge(app, tmp_path, monkeypatch):
-    from dxclient.core.alarms import AlarmEntry
-
-    w = _window(tmp_path, monkeypatch)
-    w.alarms.entries = [AlarmEntry("JA1ABC"), AlarmEntry("VP8*")]
-    w._alarms_changed(w.alarms.entries)
-    w._on_line("DX de RA3CO-#:    14025.0  JA1ABC       CW 23 dB 25 WPM CQ             1234Z")
-    w._on_line("DX de W1AW:      28495.0  VP8LP        SSB 59                          1236Z")
-    assert w.alarm_tab.model.rowCount() == 2
-
-    w.unread_alarms = 2
-    w.alarms.entries.pop(0)
-    w._alarms_changed(w.alarms.entries)
-
-    assert w.alarm_tab.model.rowCount() == 1
-    assert w.unread_alarms == 1
-    w.close()
+    _destroy(w)
 
 
 def test_wrong_pc_clock_does_not_drop_spots(app, tmp_path, monkeypatch):
@@ -356,6 +321,9 @@ def test_connect_timeout_aborts_and_reconnects(app):
     assert fake.aborted
     assert c.state == tc.STATE_RECONNECT_WAIT
     c._reconnect.stop()
+    from PySide6.QtCore import QCoreApplication, QEvent
+    c.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def test_watchdog_reconnects_silent_connection(app):
@@ -416,42 +384,44 @@ def test_clusters_tab_tolerates_bad_custom_nodes(app, tmp_path):
     _destroy(tab)
 
 
-def test_cty_update_recomputes_alarm_flags(app, tmp_path, monkeypatch):
+def test_cty_update_refreshes_country_lists_and_alarm_state(app, tmp_path, monkeypatch):
+    from datetime import date
+
+    from PySide6.QtCore import QByteArray
+    from PySide6.QtNetwork import QNetworkReply
+
     from dxclient.core.alarms import KIND_COUNTRY, AlarmEntry
     from dxclient.core.dxcc import DxccDB, Entity
+    from dxclient.core.settings import config_dir
     from dxclient.core.spot import Spot
 
     w = _window(tmp_path, monkeypatch)
+    db = DxccDB()
+    ent = Entity("Testland", "K1ABC", "EU", 1, 1, 0.0, 0.0)
+    db.entities = [ent]
+    db._prefixes = {"K1ABC": ent}
+    db._max_len = 5
+    db.version = date(2026, 11, 1)
+    w._apply_dxcc(db)
+    assert "Testland" in w.filter_panel.countries
+    assert "Testland" in w.alarm_tab.countries
+
+    # Existing spots get the new entity and their Alarm flag is recalculated.
     w.alarms.entries = [AlarmEntry("Testland", kind=KIND_COUNTRY)]
     s = Spot(14025.0, "K1ABC", "W1AW", "CW", "12:00", band="20m", mode="CW")
     s.dx_entity = Entity("Oldland", "K1ABC", "NA", 5, 5)
     s.alarm = False
     w.spot_model.add_spot(s)
     w.alarm_tab.model.add_spot(s)
-
-    db = DxccDB()
-    ent = Entity("Testland", "K1ABC", "EU", 1, 1, 0.0, 0.0)
-    db.entities = [ent]
-    db._prefixes = {"K1ABC": ent}
-    db._max_len = 5
     w._apply_dxcc(db)
-
     assert s.dx_entity == ent and s.alarm is True
     assert w.alarm_tab.model.rowCount() == 1
 
     w.alarms.entries = [AlarmEntry("Otherland", kind=KIND_COUNTRY)]
     w._apply_dxcc(db)
-    assert s.alarm is False
-    assert w.alarm_tab.model.rowCount() == 0
-    w.close()
+    assert s.alarm is False and w.alarm_tab.model.rowCount() == 0
 
-
-def test_cty_update_rejects_an_older_file(app, tmp_path, monkeypatch):
-    from PySide6.QtCore import QByteArray
-    from PySide6.QtNetwork import QNetworkReply
-
-    from dxclient.core.settings import config_dir
-
+    # An older downloaded file must be rejected without touching the current database.
     class Reply:
         def deleteLater(self):
             pass
@@ -465,25 +435,10 @@ def test_cty_update_rejects_an_older_file(app, tmp_path, monkeypatch):
     text = "=VER20200101;" + ";".join(
         f"T{i}:1:1:EU:0:0:0:T{i}:" for i in range(300)
     ) + ";"
-    w = _window(tmp_path, monkeypatch)
-    old = w.db
     w._cty_done(Reply(), silent=True)
-
-    assert w.db is old
+    assert w.db is db
     assert not (config_dir() / "cty.dat").exists()
-    w.close()
-
-
-def test_cty_update_refreshes_country_lists(app, tmp_path, monkeypatch):
-    from dxclient.core.dxcc import Entity
-
-    w = _window(tmp_path, monkeypatch)
-    db = w.db
-    db.entities.append(Entity("Testland", "TEST", "EU", 1, 1, 0.0, 0.0))
-    w._apply_dxcc(db)
-    assert "Testland" in w.filter_panel.countries
-    assert "Testland" in w.alarm_tab.countries
-    w.close()
+    _destroy(w)
 
 
 def test_alarm_pattern_is_uppercase_in_call_mode(app):
@@ -599,7 +554,27 @@ def test_removing_an_alarm_rule_drops_its_matches(app, tmp_path, monkeypatch):
     w._on_line(line.replace("1234Z", "1235Z"))  # a new spot no longer matches
     assert w.alarm_tab.model.rowCount() == 0
     assert w.unread_alarms == 0
-    w.close()
+
+    # Two rules: removing one must clamp the unread badge to the remaining matches.
+    w.spot_model.clear()
+    w.alarm_tab.model.clear()
+    w.alarms.entries = [AlarmEntry("JA1ABC"), AlarmEntry("VP8*")]
+    w._alarms_changed(w.alarms.entries)
+    w._on_line(line)
+    w._on_line("DX de W1AW:      28495.0  VP8LP        SSB 59                          1236Z")
+    assert w.alarm_tab.model.rowCount() == 2
+    w.unread_alarms = 2
+    w.alarms.entries.pop(0)
+    w._alarms_changed(w.alarms.entries)
+    assert w.alarm_tab.model.rowCount() == 1 and w.unread_alarms == 1
+
+    # Clear drops the remaining match and its badge.
+    w.alarm_tab.clear_btn.click()
+    app.processEvents()
+    from dxclient.i18n import tr
+    assert w.alarm_tab.model.rowCount() == 0 and w.unread_alarms == 0
+    assert w.tabs.tabText(1) == tr("Alarm")
+    _destroy(w)
 
 
 def test_settings_are_saved_with_debounce(app, tmp_path, monkeypatch):
